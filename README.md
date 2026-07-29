@@ -1,104 +1,14 @@
-# uzdoom-wasm
+# webdoom
 
-WebAssembly port of [UZDoom](https://github.com/UZDoom/UZDoom). Play GZDoom-family Doom-engine games directly in any modern browser — WebGL2 renderer, OpenAL audio, pthreads, saves persisted to IndexedDB. Ships with Freedoom; bring your own IWAD or PK3 mods via drag-and-drop. No install, nothing leaves your browser.
+Fork of [abootnet/uzdoom-wasm](https://github.com/abootnet/uzdoom-wasm) (WebAssembly port of [UZDoom](https://github.com/UZDoom/UZDoom)) with tweaks to optimize for Brutal Doom v22b6, plus a persistent boot config for auto-launch behavior.
 
-> **Status:** early port, vanilla Freedoom is fully playable. Brutal Doom and other heavy ZScript mods are the next target.
+Running at [doom.xode.cc](https://doom.xode.cc).
 
-## Features
+The upstream fork is the general-purpose project: picker UI, iframe embedding, many IWADs. This one is narrower — a container you point at a directory of WADs so it boots one game. See the [upstream README](https://github.com/abootnet/uzdoom-wasm#readme) for the features not covered here.
 
-- **GLES2 / WebGL2 renderer** — the full UZDoom OpenGL ES backend, unmodified.
-- **OpenAL + ZMusic** — 3D sound, MIDI, OGG music; 44.1 kHz mix.
-- **Pthreads** — renderer worker threads via Web Workers + `SharedArrayBuffer`.
-- **IndexedDB persistence** — save games, config, and uploaded WADs survive across sessions.
-- **Drag-and-drop UI** — pick an IWAD + PK3 mods right on the page.
-- **Clean shutdown** — Quit from the menu flushes saves, shows an exit panel, offers Relaunch.
+## Deploy
 
-## Quick start
-
-If you just want to play, visit the hosted build at **https://uzdoom.bootnet.io/**. Upload your IWAD (or click *Use bundled Freedoom*), drop any PK3 mods, hit Launch.
-
-If you want to deploy it quickly on your own server:
-`docker run --rm -p 8080:80 ghcr.io/chriscorbell/webdoom:latest`
-
-To boot straight into a specific game on every visit (no picker), see
-[Kiosk mode](#kiosk-mode-auto-launch-a-game-on-every-visit).
-
-## Launching with URL parameters
-
-The loader accepts a small set of query-string parameters so other sites, bookmarks, terminal easter eggs, or a Discord link can drop straight into a specific IWAD + map + settings without touching the picker. When an `iwad=` param is present and resolves, the picker is skipped and the engine auto-launches.
-
-### Parameters
-
-| Param        | Example                 | Meaning                                                                                  |
-|--------------|-------------------------|------------------------------------------------------------------------------------------|
-| `iwad`       | `iwad=freedoom1.wad`    | IWAD filename. Must be bundled, side-loaded (see below), or previously uploaded via UI.  |
-| `file`       | `file=brutal.pk3,hud.pk3` | Comma-separated mod list (max 10). Each must be in IDBFS from a prior upload, or side-loaded (see below). |
-| `warp`       | `warp=1,1` / `warp=5`   | `-warp E,M` for Doom, `-warp MAP` for Doom II.                                           |
-| `skill`      | `skill=4`               | `-skill 1..5` (ITYTD..Nightmare).                                                        |
-| `map`        | `map=E2M4`              | `+map <name>` — alternative to `warp` for named maps.                                    |
-| `nomonsters` | `nomonsters=1`          | `-nomonsters`.                                                                           |
-| `fast`       | `fast=1`                | `-fast`.                                                                                 |
-| `respawn`    | `respawn=1`             | `-respawn`.                                                                              |
-| `cheat`      | `cheat=god,iddqd`       | Whitelisted argless cheats auto-issued at launch (see list below).                       |
-| `nomelt`     | `nomelt=1`              | Skip the picker→game screen-melt transition; straight cut instead.                       |
-
-### Examples
-
-```
-# Freedoom Phase 1, E1M1, skill 4
-https://your-host/?iwad=freedoom1.wad&warp=1,1&skill=4
-
-# Doom II MAP05, fast monsters, god mode
-https://your-host/?iwad=doom2.wad&warp=5&fast=1&cheat=god
-
-# Load a previously uploaded mod on top of a bundled IWAD
-https://your-host/?iwad=freedoom2.wad&file=mymod.pk3
-```
-
-### Security model (whitelist, not sanitization)
-
-User URL strings are **never** concatenated into argv. Every param is validated against a strict regex and dropped silently on mismatch:
-
-- Filenames: `/^[a-z0-9_.-]+\.(wad|pk3|pk7|zip|deh|bex)$/i` — no paths, no spaces, no quoting.
-- `warp`: `/^\d{1,2}(?:,\d{1,2})?$/` — one or two small decimals.
-- `skill`: `/^[1-5]$/`.
-- `map`: `/^[A-Za-z0-9_]{2,8}$/`.
-- `cheat`: only the allowlisted commands below, comma-separated.
-
-**Allowed cheats** (argless only — anything taking free-form arguments like `summon`, `give`, `changemap` is intentionally excluded):
-
-```
-god  iddqd  buddha  noclip  idclip  notarget
-fly  idfa   idkfa   resurrect  kill
-```
-
-Adding parameters means editing the regex table + whitelist in `web/uzdoom-loader.js` (search for `parseLauncherArgs`) — by design, nothing reads generic query strings.
-
-### Side-loaded WADs and mods (runtime volume mounts)
-
-Some IWADs can't live in the public repo or Docker image for licensing reasons but are fine to serve from a private path on your own host. Any launch-referenced file (IWAD via `?iwad=`, mods via `?file=`) that isn't already in IDBFS is fetched from `/private/<name>` on the server, written to `/wads/<name>`, and persisted to IndexedDB so future loads skip the fetch. No registration step: a name the server doesn't have just 404s and falls back to the normal missing-file handling.
-
-The shipped Caddyfile serves `/srv/private/` with `X-Robots-Tag: noindex, nofollow` and a long immutable cache. The typical deployment is:
-
-```bash
-docker run --rm -p 8080:80 \
-  -v /your/private/wads:/srv/private:ro \
-  ghcr.io/chriscorbell/webdoom:latest
-```
-
-Any file you place in `/your/private/wads/` becomes launchable via `?iwad=<name>` / `?file=<name>` from anywhere.
-
-### Kiosk mode (auto-launch a game on every visit)
-
-To make a bare visit to `/` boot straight into a game — no picker, no URL params — drop a `boot.json` into the same private mount:
-
-```json
-{ "iwad": "doom2.wad", "file": "brutal22test6.pk3", "skill": 3 }
-```
-
-Keys mirror the URL parameters (`iwad`, `file` — string or array, `warp`, `skill`, `map`, `nomonsters`, `fast`, `respawn`, `cheat`, `nomelt`) and pass through the same whitelist validation. Explicit URL params still win: a link with `?iwad=…` bypasses `boot.json`, so shared links keep working on a kiosk deployment. First visit fetches the WADs from `/private/` (with progress UI); after that they load from the browser's IndexedDB.
-
-A complete home-server deployment for Doom 2 + Brutal Doom:
+WADs stay out of the image, so mount a directory containing them plus a `boot.json`:
 
 ```bash
 mkdir -p /srv/doom
@@ -112,136 +22,74 @@ docker run -d --restart unless-stopped -p 8080:80 \
   ghcr.io/chriscorbell/webdoom:latest
 ```
 
-Behind a reverse proxy, two things matter:
+Visiting the address now loads Doom 2 with Brutal Doom, no picker. The first visit downloads the WADs from `/private/` with a progress bar; later visits read them from the browser's IndexedDB.
 
-- **Don't strip the COOP/COEP headers.** The container's Caddy sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`; the proxy must pass them through untouched or pthreads won't start.
-- **Serve over HTTPS** (or only ever browse via `http://localhost`). `SharedArrayBuffer` requires a secure context, and a plain-HTTP LAN IP or hostname is not one — the engine will fail to spin up its threads.
+Without a `boot.json`, you get the upstream picker UI instead — upload an IWAD, drop in mods, press Launch.
 
-### Embedding in an iframe
+### Behind a reverse proxy
 
-The loader detects when it's running inside an iframe (`window.self !== window.top`) and:
+Two requirements, both of which break the game completely if missed:
 
-- Appends `+i_pauseinbackground 0` to argv. Without it the engine halts rendering whenever the iframe loses focus, and a cross-origin iframe never has focus until the user clicks inside it, so the game would appear frozen. (`+vid_fullscreen 0` is appended unconditionally in all modes — the engine's default would call `Element.requestFullscreen()` on launch, which blocks the picker→game melt overlay and generally isn't what you want on a button click.)
-- Posts two `postMessage` events to the parent at well-defined points in the launch:
-  - `{ type: 'uzdoom:launched' }` — fires when `callMain` is about to hand control to the engine main loop. Engine initialization has started; pixels are not on screen yet.
-  - `{ type: 'uzdoom:revealed' }` — fires after the picker→game screen-melt finishes (or immediately after `uzdoom:launched` if the melt is opted out via `?nomelt=1`). The game is fully visible as of this message.
-  
-  Parents coordinating their own reveal animation with the inner transition typically want `uzdoom:revealed`. Parents that just want "engine is booting, swap my loader overlay" can use `uzdoom:launched`. A timer-based fallback is still a good idea for either — the message won't arrive on older builds or if the engine fails to initialize.
-- Runs the picker→game [screen-melt](web/uzdoom-melt.js) by default. If the parent page is already doing its own cross-frame fade or slide, pass `?nomelt=1` so the two transitions don't double-animate.
+- **Pass the COOP/COEP headers through untouched.** The bundled Caddy sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Without both arriving intact, `crossOriginIsolated` is false, `SharedArrayBuffer` does not exist, and the engine's threads never start.
+- **Serve it over HTTPS.** `SharedArrayBuffer` requires a secure context. A plain-HTTP LAN address or hostname is not one, so the engine fails to start there. Plain HTTP works only on `localhost`.
 
-Parent-page example:
+## Configuration
 
-```js
-const iframe = document.createElement('iframe');
-iframe.src = 'https://your-host/?iwad=doom.wad&warp=1,1';
-iframe.allow = 'cross-origin-isolated; fullscreen; gamepad; autoplay';
-document.body.appendChild(iframe);
+`boot.json` sets the default launch. The same settings work as URL parameters, and an explicit `?iwad=` in the URL overrides `boot.json` entirely, so shared links keep working on a kiosk deployment.
 
-window.addEventListener('message', (e) => {
-  if (e.source !== iframe.contentWindow) return;
-  if (e.data?.type === 'uzdoom:launched') {
-    // engine is initializing — e.g. swap your loader overlay
-  } else if (e.data?.type === 'uzdoom:revealed') {
-    // melt finished, game is fully on screen — play your reveal
-  }
-});
-```
+| Key / param  | Example                     | Meaning                                            |
+|--------------|-----------------------------|----------------------------------------------------|
+| `iwad`       | `doom2.wad`                 | The IWAD. Required for auto-launch.                |
+| `file`       | `brutal22test6.pk3`         | Mods, as a string, comma-separated list, or array. Max 10. |
+| `warp`       | `1` / `1,1`                 | Jump straight to a map, skipping the menu.         |
+| `skill`      | `4`                         | Difficulty, 1–5.                                    |
+| `map`        | `E2M4`                      | Named map, as an alternative to `warp`.            |
+| `nomonsters` | `1`                         | No monsters.                                        |
+| `fast`       | `1`                         | Fast monsters.                                      |
+| `respawn`    | `1`                         | Respawning monsters.                                |
+| `cheat`      | `god,idfa`                  | Cheats applied at launch. Allowlisted, argless only. |
+| `nomelt`     | `1`                         | Skip the screen-melt transition into the game.     |
 
-For COOP/COEP to hold across the frame boundary, the parent page must also set `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`, and the iframe needs `allow="cross-origin-isolated; …"`. Without that, `crossOriginIsolated` will be `false` inside the iframe and pthreads won't spin up.
+So `{ "iwad": "doom2.wad", "file": "brutal22test6.pk3", "warp": 1, "skill": 4 }` drops straight into MAP01 on Ultra-Violence rather than stopping at the menu.
+
+URL strings are never pasted into the engine's argv. Every value is checked against a strict pattern and dropped if it does not match; filenames allow no paths or spaces. Adding a parameter means editing the pattern table in `web/uzdoom-loader.js` — nothing reads arbitrary query strings.
+
+### Side-loaded files
+
+Any file named by `iwad` or `file` that is not already in IndexedDB gets fetched from `/private/<name>`, then saved so later visits skip the download. There is no registration step: a name the server does not have returns 404 and falls back to the normal missing-file handling. Anything you drop in the mounted directory is loadable by name.
+
+The Caddyfile serves `/srv/private/` with `X-Robots-Tag: noindex, nofollow` and a long cache lifetime.
 
 ## Building from source
 
-### Prerequisites
-
-- [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) (`emsdk` — tested with 3.1.x and later)
-- CMake 3.20+
-- Ninja (`pip install ninja` or system package)
-- Python 3 (for the local dev server)
-- Git Bash or WSL on Windows; any POSIX shell on Linux/macOS
-
-### One-shot build
+Needs the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html), CMake 3.20+, Ninja, and Python 3. `build-wasm.sh` finds `emsdk` via `$EMSDK`, `./emsdk/`, or `../emsdk/`, and builds the native `lemon` and `re2c` helpers itself on Linux and macOS.
 
 ```bash
-# Clone
 git clone https://github.com/chriscorbell/webdoom.git
 cd webdoom
-
-# Install Emscripten (one-time; installs into ./emsdk/ by default)
 git clone https://github.com/emscripten-core/emsdk.git
 (cd emsdk && ./emsdk install latest && ./emsdk activate latest)
 
-# Build
-./build-wasm.sh                       # Release build
-BUILD_TYPE=Debug ./build-wasm.sh      # Debug build
-INITIAL_MEM=512 ./build-wasm.sh       # Override initial linear-memory MB
-EMSDK=/path/to/emsdk ./build-wasm.sh  # Point at an emsdk elsewhere
-
-# Serve (sets COOP/COEP headers required for SharedArrayBuffer)
-python web/serve.py
-# Open http://localhost:8080/uzdoom.html
+./build-wasm.sh                       # Release; BUILD_TYPE=Debug for a debug build
+python3 web/serve.py                  # serves build-wasm/ with the COOP/COEP headers
+# open http://localhost:8080/uzdoom.html
 ```
 
-Output artifacts land in `build-wasm/`:
+`docker build -t webdoom .` produces the deployable image the same way CI does.
 
-| File                | Purpose                                  |
-|---------------------|------------------------------------------|
-| `uzdoom.html`       | Page shell                               |
-| `uzdoom.js`         | Emscripten runtime + glue                |
-| `uzdoom.wasm`       | Compiled engine                          |
-| `uzdoom.data`       | Bundled Freedoom + built-in assets       |
-| `uzdoom-loader.js`  | UI loader (WAD upload, progress, etc.)   |
+## What this fork changes
 
-### Hosting
+Relative to [abootnet/uzdoom-wasm](https://github.com/abootnet/uzdoom-wasm):
 
-The simplest path is the prebuilt image:
-`docker run --rm -p 8080:80 ghcr.io/chriscorbell/webdoom:latest`
-
-For custom hosting, the shipped Caddyfile handles the required headers automatically; any static host works as long as it sets Cross-Origin-Opener and Cross-Origin-Embedder headers on the `.html` / `.js` / `.wasm`.
-
-```
-Cross-Origin-Opener-Policy:  same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
-
-Without these, `crossOriginIsolated === false` and pthreads will refuse to spin up.
-
-## Architecture
-
-```
-  Browser page  ──┐
-                  │    Canvas + drag-drop UI + IDBFS writes
-                  ▼
-  uzdoom.js / .wasm (Emscripten output)
-     • emscripten_set_main_loop_arg()       ← restructured D_DoomLoop
-     • SDL2 → canvas + WebGL2 + input
-     • OpenAL → WebAudio
-     • pthreads → Web Workers + SharedArrayBuffer
-     • MEMFS (bundled Freedoom) + IDBFS (user WADs, saves, config)
-                  │
-                  ▼
-  UZDoom core
-     • GLES2 rendering backend only (WebGL2 context)
-     • Vulkan + desktop-GL 3.3 backends compiled out
-     • HAVE_VM_JIT off (asmjit is x86_64-only, gated upstream)
-```
-
-## What's different from upstream UZDoom
-
-Only two real categories of change:
-
-1. **`#ifdef __EMSCRIPTEN__` branches** in a handful of platform files to restructure the main loop into a per-frame tick, force a GL ES context, and swap `fts_open`/NUMA calls for portable equivalents.
-2. **A thin platform layer** under `src/common/platform/emscripten/` mounting IDBFS, wiring pointer lock and canvas resize, and exposing a `uzdoom_sync_saves()` hook for the JS side.
-
-A minimal ZMusic stub lives under `libraries/zmusic-stub/` because the upstream ZMusic dependency chain pulls in things (fluidsynth, dumb, gme) that don't play well with WASM. The stub covers OGG music + MIDI via the bundled OPL/Timidity backends.
-
-Everything else — renderer, filesystem, playsim, ZScript VM — is upstream UZDoom code.
+- **Brutal Doom damage overlays render correctly.** They used to cover the screen in near-opaque red, so they shipped disabled. The cause was the HUD message cap being applied per font: Brutal Doom draws damage with about 20 different graphics over the same pixels, so a cap of 4 each still allowed roughly 80 stacked translucent layers. Capping all of them together fixed it, and they are enabled again.
+- **`boot.json`**, so a deployment auto-launches a chosen game with no URL parameters.
+- **Side-loading covers mods**, not just IWADs, and needs no lookup table.
+- **Builds on Linux and macOS.** Upstream's helper tools only shipped as Windows binaries, so `./build-wasm.sh` previously worked only inside Docker.
 
 ## Credits & license
 
-- **License:** GPLv3 (inherited from UZDoom). See [`LICENSE`](LICENSE).
-- **Attribution:** see [`CREDITS.md`](CREDITS.md) for the full chain from id Software through ZDoom, GZDoom, UZDoom, and the WASM port.
-- **Upstream UZDoom README:** preserved at [`docs/README-upstream.md`](docs/README-upstream.md).
+- **License:** GPLv3, inherited from UZDoom. See [`LICENSE`](LICENSE).
+- **Attribution:** [`CREDITS.md`](CREDITS.md) has the full chain from id Software through ZDoom, GZDoom, UZDoom, and the WASM port.
+- **Upstream UZDoom README:** kept at [`docs/README-upstream.md`](docs/README-upstream.md).
 
-## Contributing
-
-Bug reports, patches, and port-specific improvements welcome. If you're fixing something in the core engine (renderer, playsim, etc.), please also send it upstream to [UZDoom](https://github.com/UZDoom/UZDoom) where it belongs — this repo only exists for the WASM-specific glue.
+WADs are not included and not distributed here. Bring your own.
