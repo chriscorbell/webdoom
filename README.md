@@ -18,7 +18,10 @@ WebAssembly port of [UZDoom](https://github.com/UZDoom/UZDoom). Play GZDoom-fami
 If you just want to play, visit the hosted build at **https://uzdoom.bootnet.io/**. Upload your IWAD (or click *Use bundled Freedoom*), drop any PK3 mods, hit Launch.
 
 If you want to deploy it quickly on your own server:
-`docker run --rm -p 8080:80 ghcr.io/abootnet/uzdoom-wasm:latest`
+`docker run --rm -p 8080:80 ghcr.io/chriscorbell/webdoom:latest`
+
+To boot straight into a specific game on every visit (no picker), see
+[Kiosk mode](#kiosk-mode-auto-launch-a-game-on-every-visit).
 
 ## Launching with URL parameters
 
@@ -29,7 +32,7 @@ The loader accepts a small set of query-string parameters so other sites, bookma
 | Param        | Example                 | Meaning                                                                                  |
 |--------------|-------------------------|------------------------------------------------------------------------------------------|
 | `iwad`       | `iwad=freedoom1.wad`    | IWAD filename. Must be bundled, side-loaded (see below), or previously uploaded via UI.  |
-| `file`       | `file=brutal.pk3,hud.pk3` | Comma-separated mod list (max 10). Each must already be in IDBFS from a prior upload.  |
+| `file`       | `file=brutal.pk3,hud.pk3` | Comma-separated mod list (max 10). Each must be in IDBFS from a prior upload, or side-loaded (see below). |
 | `warp`       | `warp=1,1` / `warp=5`   | `-warp E,M` for Doom, `-warp MAP` for Doom II.                                           |
 | `skill`      | `skill=4`               | `-skill 1..5` (ITYTD..Nightmare).                                                        |
 | `map`        | `map=E2M4`              | `+map <name>` — alternative to `warp` for named maps.                                    |
@@ -71,19 +74,48 @@ fly  idfa   idkfa   resurrect  kill
 
 Adding parameters means editing the regex table + whitelist in `web/uzdoom-loader.js` (search for `parseLauncherArgs`) — by design, nothing reads generic query strings.
 
-### Side-loaded IWADs (runtime volume mounts)
+### Side-loaded WADs and mods (runtime volume mounts)
 
-Some IWADs can't live in the public repo or Docker image for licensing reasons but are fine to serve from a private path on your own host. The loader has a lookup table (`SIDELOADED_IWADS` in `web/uzdoom-loader.js`) mapping filenames to server-relative paths. If a URL references one of these IWADs and it isn't already in IDBFS, the loader fetches it from the mapped path, writes it to `/wads/<name>`, and persists it for future loads.
+Some IWADs can't live in the public repo or Docker image for licensing reasons but are fine to serve from a private path on your own host. Any launch-referenced file (IWAD via `?iwad=`, mods via `?file=`) that isn't already in IDBFS is fetched from `/private/<name>` on the server, written to `/wads/<name>`, and persisted to IndexedDB so future loads skip the fetch. No registration step: a name the server doesn't have just 404s and falls back to the normal missing-file handling.
 
-The shipped Caddyfile mounts `/srv/private/` with `X-Robots-Tag: noindex, nofollow` and a long immutable cache. The typical deployment is:
+The shipped Caddyfile serves `/srv/private/` with `X-Robots-Tag: noindex, nofollow` and a long immutable cache. The typical deployment is:
 
 ```bash
 docker run --rm -p 8080:80 \
   -v /your/private/wads:/srv/private:ro \
-  ghcr.io/abootnet/uzdoom-wasm:latest
+  ghcr.io/chriscorbell/webdoom:latest
 ```
 
-Any `.wad` you place in `/your/private/wads/` and register in the `SIDELOADED_IWADS` table becomes launchable via `?iwad=<name>` from anywhere.
+Any file you place in `/your/private/wads/` becomes launchable via `?iwad=<name>` / `?file=<name>` from anywhere.
+
+### Kiosk mode (auto-launch a game on every visit)
+
+To make a bare visit to `/` boot straight into a game — no picker, no URL params — drop a `boot.json` into the same private mount:
+
+```json
+{ "iwad": "doom2.wad", "file": "brutal22test6.pk3", "skill": 3 }
+```
+
+Keys mirror the URL parameters (`iwad`, `file` — string or array, `warp`, `skill`, `map`, `nomonsters`, `fast`, `respawn`, `cheat`, `nomelt`) and pass through the same whitelist validation. Explicit URL params still win: a link with `?iwad=…` bypasses `boot.json`, so shared links keep working on a kiosk deployment. First visit fetches the WADs from `/private/` (with progress UI); after that they load from the browser's IndexedDB.
+
+A complete home-server deployment for Doom 2 + Brutal Doom:
+
+```bash
+mkdir -p /srv/doom
+cp doom2.wad brutal22test6.pk3 /srv/doom/
+cat > /srv/doom/boot.json <<'EOF'
+{ "iwad": "doom2.wad", "file": "brutal22test6.pk3" }
+EOF
+
+docker run -d --restart unless-stopped -p 8080:80 \
+  -v /srv/doom:/srv/private:ro \
+  ghcr.io/chriscorbell/webdoom:latest
+```
+
+Behind a reverse proxy, two things matter:
+
+- **Don't strip the COOP/COEP headers.** The container's Caddy sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`; the proxy must pass them through untouched or pthreads won't start.
+- **Serve over HTTPS** (or only ever browse via `http://localhost`). `SharedArrayBuffer` requires a secure context, and a plain-HTTP LAN IP or hostname is not one — the engine will fail to spin up its threads.
 
 ### Embedding in an iframe
 
@@ -131,8 +163,8 @@ For COOP/COEP to hold across the frame boundary, the parent page must also set `
 
 ```bash
 # Clone
-git clone https://github.com/abootnet/uzdoom-wasm.git
-cd uzdoom-wasm
+git clone https://github.com/chriscorbell/webdoom.git
+cd webdoom
 
 # Install Emscripten (one-time; installs into ./emsdk/ by default)
 git clone https://github.com/emscripten-core/emsdk.git
@@ -162,7 +194,7 @@ Output artifacts land in `build-wasm/`:
 ### Hosting
 
 The simplest path is the prebuilt image:
-`docker run --rm -p 8080:80 ghcr.io/abootnet/uzdoom-wasm:latest`
+`docker run --rm -p 8080:80 ghcr.io/chriscorbell/webdoom:latest`
 
 For custom hosting, the shipped Caddyfile handles the required headers automatically; any static host works as long as it sets Cross-Origin-Opener and Cross-Origin-Embedder headers on the `.html` / `.js` / `.wasm`.
 
