@@ -761,16 +761,27 @@ void DBaseStatusBar::CallTick()
 //   - native gameplay                       → peak red ≈ 210, suggests
 //     ~3-5 messages overlapping at any moment
 //
-// Implementation: this CVar now controls the *cap* on how many same-
-// font anonymous-id messages can coexist in a layer. AttachMessage
-// removes the oldest extras beyond the cap. 0 = unlimited (old "dedup
-// off"), 1 = single replacement (old "dedup on"), 3-5 ≈ native look.
+// Implementation: this CVar caps how many anonymous-id messages may
+// coexist in a layer. AttachMessage removes the oldest extras beyond the
+// cap. 0 = unlimited (old "dedup off"), 1 = single replacement.
+//
+// The cap is applied per *group*, and all pic-font messages form ONE
+// group regardless of which graphic they wrap. Grouping them per-font
+// (the original implementation) does not bound what actually matters:
+// Brutal Doom paints its damage overlays with ~20 different graphics
+// (PAIN1, SCRATCH, PBULA1-PBULF3, RBLD1-11, XBREAK, BREAK1/S), all
+// stacked over the same screen region. A per-font cap of 4 therefore
+// still allowed ~80 overlapping translucent quads, which composites to
+// solid red — measured in the WASM build as 85% of pixels strongly red
+// under sustained damage, and unchanged when the per-font cap was
+// lowered to 1. Counting all pic fonts together makes the cap mean what
+// its name implies: at most N overlay layers on screen at once.
 CUSTOM_CVARD(Int, hud_idzero_stack_cap, 4,
 	CVAR_ARCHIVE | CVAR_GLOBALCONFIG,
-	"Maximum number of anonymous-id (id=0 or id=-1) HUD messages with the "
-	"same font that may coexist in a layer. 0 = unlimited stacking, 1 = "
-	"single replacement, default 4 matches native UZDoom's natural "
-	"sustained-damage bar intensity for mods like Brutal Doom.")
+	"Maximum number of anonymous-id (id=0 or id=-1) HUD messages that may "
+	"coexist in a layer. All pic-font overlays (e.g. Brutal Doom's damage "
+	"graphics) count as one group. 0 = unlimited stacking, 1 = single "
+	"replacement, default 4.")
 {
 	if (self < 0) self = 0;
 	if (self > 64) self = 64;
@@ -804,20 +815,31 @@ void DBaseStatusBar::AttachMessage (DHUDMessageBase *msg, uint32_t id, int layer
 		layer = HUDMSGLayer_Default;
 	}
 
-	// Cap on same-font anonymous-id messages. See CVar comment above for
-	// rationale. cap == 0 means unlimited (no removal).
+	// Cap on anonymous-id messages. See CVar comment above for rationale.
+	// cap == 0 means unlimited (no removal).
 	FFont *newFont = msg->GetFont();
 	int effectiveCap = hud_idzero_stack_cap;
 	if ((id == 0 || id == 0xFFFFFFFF) && effectiveCap > 0 && newFont != nullptr)
 	{
-		// Count existing same-font anonymous-id messages in this layer.
+		// Messages are in the same group if they share a font, or if both
+		// are pic fonts — every pic font is a screen overlay competing for
+		// the same pixels, so they must be capped collectively.
+		const bool newIsPic = newFont->IsSinglePicFont();
+		auto sameGroup = [newFont, newIsPic](DHUDMessageBase *p)
+		{
+			FFont *f = p->GetFont();
+			if (f == nullptr) return false;
+			return newIsPic ? f->IsSinglePicFont() : f == newFont;
+		};
+
+		// Count existing anonymous-id messages in this layer's group.
 		// If count + 1 (this new one) > cap, remove the oldest ones until
 		// we'd be at exactly (cap - 1) so that after attaching the new
 		// one we land at cap.
 		int count = 0;
 		for (DHUDMessageBase *p = Messages[layer]; p; p = p->Next)
 		{
-			if ((p->SBarID == 0 || p->SBarID == 0xFFFFFFFF) && p->GetFont() == newFont)
+			if ((p->SBarID == 0 || p->SBarID == 0xFFFFFFFF) && sameGroup(p))
 			{
 				count++;
 			}
@@ -832,7 +854,7 @@ void DBaseStatusBar::AttachMessage (DHUDMessageBase *msg, uint32_t id, int layer
 			while (toRemove > 0 && (*cur).Get() != nullptr)
 			{
 				DHUDMessageBase *candidate = (*cur).Get();
-				if ((candidate->SBarID == 0 || candidate->SBarID == 0xFFFFFFFF) && candidate->GetFont() == newFont)
+				if ((candidate->SBarID == 0 || candidate->SBarID == 0xFFFFFFFF) && sameGroup(candidate))
 				{
 					*cur = candidate->Next;
 					candidate->Destroy();
