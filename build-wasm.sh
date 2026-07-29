@@ -110,6 +110,36 @@ echo "  cmake   : $(command -v cmake || echo 'cmake NOT in PATH')"
 echo
 
 mkdir -p "$BUILD"
+
+# --- Native host tools (lemon, re2c) ---------------------------------------
+# The cross-compile shells out to lemon (parser gen) and re2c (lexer gen),
+# which must run on the BUILD host, not the WASM target. tools-native/ only
+# ships Windows .exe builds; on any other host, build them from the in-tree
+# sources once and point IMPORT_EXECUTABLES at those instead.
+IMPORT_EXECUTABLES="$ROOT/tools-native/ImportExecutables.cmake"
+if [[ -z "$EMCC_EXT" ]]; then
+  NATIVE="$BUILD/native"
+  for tool in lemon re2c; do
+    if [[ ! -x "$NATIVE/$tool/$tool" ]]; then
+      echo "== Building native host tool: $tool =="
+      cmake -S "$ROOT/tools/$tool" -B "$NATIVE/$tool" -G Ninja \
+        -DCMAKE_MAKE_PROGRAM="$NINJA" -DCMAKE_BUILD_TYPE=Release >/dev/null
+      cmake --build "$NATIVE/$tool" >/dev/null
+    fi
+  done
+  cat > "$NATIVE/ImportExecutables.cmake" <<EOF
+if(NOT TARGET re2c)
+    add_executable(re2c IMPORTED)
+    set_target_properties(re2c PROPERTIES IMPORTED_LOCATION "$NATIVE/re2c/re2c")
+endif()
+if(NOT TARGET lemon)
+    add_executable(lemon IMPORTED)
+    set_target_properties(lemon PROPERTIES IMPORTED_LOCATION "$NATIVE/lemon/lemon")
+endif()
+EOF
+  IMPORT_EXECUTABLES="$NATIVE/ImportExecutables.cmake"
+fi
+
 cd "$BUILD"
 
 echo "== Configuring (CMake, Ninja generator) =="
@@ -124,7 +154,7 @@ cmake "$SRC" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DUZDOOM_WASM_INITIAL_MEMORY_MB="$INITIAL_MEM" \
   -DCMAKE_CROSSCOMPILING=TRUE \
-  -DIMPORT_EXECUTABLES="$ROOT/tools-native/ImportExecutables.cmake" \
+  -DIMPORT_EXECUTABLES="$IMPORT_EXECUTABLES" \
   -DHAVE_VULKAN=OFF \
   -DHAVE_GLES2=ON \
   -DNO_GTK=ON \
