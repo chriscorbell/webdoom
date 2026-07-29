@@ -9,6 +9,10 @@ cmake-build-*/
 # User-local SDK
 emsdk/
 
+# Local test harness — node_modules plus a browser profile holding whatever
+# IWADs/mods were seeded into IndexedDB (easily hundreds of MB).
+web/tests/
+
 # Git
 .git/
 .github/

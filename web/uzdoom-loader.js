@@ -117,8 +117,7 @@
   const RE_MAP          = /^[A-Za-z0-9_]{2,8}$/;
   const RE_CHEAT_LIST   = /^[a-z0-9_,]{1,80}$/i;
 
-  function parseLauncherArgs() {
-    const params = new URLSearchParams(window.location.search);
+  function parseLauncherArgs(params = new URLSearchParams(window.location.search)) {
     const out = { iwad: null, files: [], argv: [], nomelt: false };
 
     // Opt-out for the picker-to-game melt transition. Iframe embedders
@@ -160,24 +159,69 @@
     return out;
   }
 
-  const launcherArgs = parseLauncherArgs();
+  // Effective launch config. Starts as the URL params; may be replaced by
+  // the server's boot.json default (see loadBootConfig) when the URL doesn't
+  // name an IWAD itself. `let` because the swap happens after an async fetch.
+  let launcherArgs = parseLauncherArgs();
 
-  // ---- Side-loaded IWADs -------------------------------------------------
+  // ---- Server-side default launch (boot.json) ----------------------------
   //
-  // IWADs that live at a known path on the server but are NOT shipped in
-  // the repo or the Docker image. Intended for runtime-mounted volumes
-  // (docker run -v /host/wads:/srv/private:ro). If the URL references one
-  // of these names and it's missing from IDBFS, the loader fetches it
-  // from the mapped path, writes it to /wads/<name>, and persists it to
-  // IndexedDB so subsequent loads skip the fetch entirely.
+  // A deployment can auto-launch a specific game with zero URL params by
+  // mounting a boot.json next to its side-loaded WADs:
   //
-  // Adding a new side-loaded IWAD is two lines here plus putting the file
-  // on the host at the expected volume path. Names are lowercased for
-  // case-insensitive matching against URL params.
-  const SIDELOADED_IWADS = {
-    'doom.wad':  '/private/doom.wad',
-    'doom2.wad': '/private/doom2.wad',
-  };
+  //   /srv/private/boot.json:
+  //     { "iwad": "doom2.wad", "file": "brutal22test6.pk3", "skill": 4 }
+  //
+  // Keys mirror the URL params (iwad, file, warp, skill, map, nomonsters,
+  // fast, respawn, cheat, nomelt) and go through the exact same whitelist
+  // validation — boot.json is server-controlled, but there is no reason to
+  // give it a wider surface than the URL gets. Explicit URL params still
+  // win: a URL that names an iwad bypasses boot.json entirely, so shared
+  // links keep working on a kiosk deployment. No boot.json (404) means the
+  // picker UI as usual.
+  async function loadBootConfig() {
+    let resp;
+    try {
+      resp = await fetch('private/boot.json', { cache: 'no-store' });
+    } catch (e) {
+      return null; // network error — treat like absence
+    }
+    if (!resp.ok) return null;
+    try {
+      const j = await resp.json();
+      const p = new URLSearchParams();
+      for (const k of ['iwad', 'warp', 'skill', 'map', 'cheat']) {
+        if (typeof j[k] === 'string' || typeof j[k] === 'number') p.set(k, String(j[k]));
+      }
+      if (Array.isArray(j.file)) p.set('file', j.file.join(','));
+      else if (typeof j.file === 'string') p.set('file', j.file);
+      for (const k of ['nomonsters', 'fast', 'respawn', 'nomelt']) {
+        if (j[k] === 1 || j[k] === '1' || j[k] === true) p.set(k, '1');
+      }
+      return parseLauncherArgs(p);
+    } catch (e) {
+      console.warn('[uzdoom-loader] private/boot.json exists but is invalid, ignoring:', e);
+      return null;
+    }
+  }
+
+  // ---- Side-loaded files ---------------------------------------------------
+  //
+  // WADs and mods that live under /private/ on the server but are NOT
+  // shipped in the repo or the Docker image — runtime-mounted volumes
+  // (docker run -v /host/wads:/srv/private:ro). Any launch-referenced file
+  // (iwad or mod) that is missing from IDBFS is fetched from
+  // private/<name>, written to /wads/<name>, and persisted to IndexedDB so
+  // subsequent loads skip the fetch entirely.
+  //
+  // No lookup table needed: names have already passed the strict filename
+  // regexes (no slashes, no traversal), and a name the server doesn't have
+  // simply 404s and falls through to the existing missing-file handling.
+  // Paths are relative so the app keeps working when a reverse proxy mounts
+  // it under a subpath.
+  function sideloadPath(name) {
+    return 'private/' + name.toLowerCase();
+  }
 
   const state = {
     iwad: null,       // { name, data, bundled? }
@@ -628,33 +672,42 @@
     setStatusRight(`Loaded ${formatBytes(totalBytes)}`);
   }
 
-  // Attempt to fetch a side-loaded IWAD from the server if the URL
-  // launcher referenced one that isn't in IDBFS yet. Silent no-op if the
-  // name isn't in the table or if the file is already cached. After a
-  // successful fetch we syncfs so subsequent loads pick it up for free.
-  async function resolveSideloadedIwad() {
-    if (!state.iwad || !state.iwad.persisted) return;
-    const p = IDB_WAD_MOUNT + '/' + state.iwad.name;
-    if (fsExists(p)) return;
-    const rel = SIDELOADED_IWADS[state.iwad.name.toLowerCase()];
-    if (!rel) return;
+  // Fetch any launch-referenced files (IWAD and mods) that aren't in IDBFS
+  // yet from the server's /private/ mount. Per-file failures are non-fatal:
+  // a missing IWAD surfaces through writeUserFiles' clear error, a missing
+  // mod is skipped there with a warning. After a successful fetch we syncfs
+  // so subsequent loads pick the file up straight from IndexedDB.
+  async function resolveSideloadedFiles() {
+    const wanted = [];
+    if (state.iwad && state.iwad.persisted) wanted.push(state.iwad.name);
+    for (const m of state.mods) {
+      if (m.persisted) wanted.push(m.name);
+    }
 
-    setStatus(`Fetching ${state.iwad.name}…`);
-    try {
-      const buf = await fetchWithProgress(rel, (recv, total) => {
-        setStatusRight(
-          total > 0
-            ? `${state.iwad.name}: ${formatBytes(recv)} / ${formatBytes(total)} (${(recv / total * 100).toFixed(0)}%)`
-            : `${state.iwad.name}: ${formatBytes(recv)}`
-        );
-      });
-      FS.writeFile(p, buf);
-      // Persist to IndexedDB so the next launch finds it without a fetch.
+    let fetched = 0;
+    for (const name of wanted) {
+      const p = IDB_WAD_MOUNT + '/' + name;
+      if (fsExists(p)) continue;
+
+      setStatus(`Fetching ${name}…`);
+      try {
+        const buf = await fetchWithProgress(sideloadPath(name), (recv, total) => {
+          setStatusRight(
+            total > 0
+              ? `${name}: ${formatBytes(recv)} / ${formatBytes(total)} (${(recv / total * 100).toFixed(0)}%)`
+              : `${name}: ${formatBytes(recv)}`
+          );
+        });
+        FS.writeFile(p, buf);
+        fetched++;
+        console.log(`[uzdoom-loader] side-loaded ${name} (${formatBytes(buf.length)})`);
+      } catch (e) {
+        console.warn(`[uzdoom-loader] side-load failed for ${name}:`, e);
+      }
+    }
+    if (fetched > 0) {
+      // Persist to IndexedDB so the next launch finds them without a fetch.
       syncSavesToIDB();
-      console.log(`[uzdoom-loader] side-loaded ${state.iwad.name} (${formatBytes(buf.length)})`);
-    } catch (e) {
-      // Non-fatal — writeUserFiles will surface a clear error to the user.
-      console.warn(`[uzdoom-loader] side-load failed for ${state.iwad.name}:`, e);
     }
   }
 
@@ -666,9 +719,9 @@
       try { await fetchCoreAssets(); }
       catch (e) { console.error('core asset fetch failed', e); }
 
-      // Fetch any URL-referenced IWAD that's side-loaded on the server
-      // but not yet cached in IDBFS (first-run path).
-      await resolveSideloadedIwad();
+      // Fetch any launch-referenced files that are side-loaded on the
+      // server but not yet cached in IDBFS (first-run path).
+      await resolveSideloadedFiles();
 
       let userArgs;
       try {
@@ -983,19 +1036,37 @@
     setTimeout(tick, 50);
   })();
 
-  // ---- Auto-launch from URL ----------------------------------------------
+  // ---- Auto-launch (URL params or server boot.json) ------------------------
   //
   // A valid `?iwad=…` in the query string skips the picker UI and drops
   // straight into the boot flow. Terminal shortcuts / external pages can
   // link here directly:
   //
-  //   https://uzdoom.bootnet.io/?iwad=freedoom1.wad&warp=1,1
-  //   https://uzdoom.bootnet.io/?iwad=doom.wad&warp=1,1&skill=4
+  //   https://your-host/?iwad=freedoom1.wad&warp=1,1
+  //   https://your-host/?iwad=doom.wad&warp=1,1&skill=4
   //
-  // If the iwad isn't bundled and hasn't been uploaded yet, writeUserFiles
-  // throws and bootEngine's catch restores the picker with an error
-  // message — so a stale link recovers gracefully.
-  if (launcherArgs.iwad) {
+  // When the URL doesn't name an IWAD, the loader asks the server for a
+  // default launch config (private/boot.json — see loadBootConfig). This is
+  // how a kiosk-style deployment boots its game on a bare visit to `/`.
+  //
+  // If the iwad isn't bundled, hasn't been uploaded, and isn't side-loaded
+  // on the server, writeUserFiles throws and bootEngine's catch restores
+  // the picker with an error message — so a stale link recovers gracefully.
+  (async () => {
+    let source = 'URL';
+    if (!launcherArgs.iwad) {
+      const boot = await loadBootConfig();
+      if (boot && boot.iwad) {
+        // nomelt is presentation, not launch identity — an embedder's
+        // ?nomelt=1 must keep working on a boot.json deployment.
+        boot.nomelt = boot.nomelt || launcherArgs.nomelt;
+        launcherArgs = boot;
+        source = 'boot.json';
+      }
+    }
+    if (!launcherArgs.iwad) return; // no auto-launch — picker UI as usual
+    if (state.launched) return;     // user beat the boot.json fetch to Launch
+
     const iwadLower = launcherArgs.iwad.toLowerCase();
     if (BUNDLED_IWADS.has(iwadLower)) {
       state.iwad = { name: iwadLower, data: null, bundled: iwadLower };
@@ -1006,13 +1077,13 @@
       state.mods.push({ name: f, persisted: true });
     }
     state.launched = true;
-    console.log('[launcher] auto-launch from URL:', launcherArgs);
-    setStatus('Auto-launching from URL…');
+    console.log(`[launcher] auto-launch from ${source}:`, launcherArgs);
+    setStatus(`Auto-launching from ${source}…`);
     if (Module && Module.calledRun) {
       bootEngine();
     } else {
       Module.onRuntimeInitialized = bootEngine;
     }
-  }
+  })();
 
 })();

@@ -48,37 +48,14 @@ RUN if [ ! -f /src/web/assets/freedoom1.wad ] || [ ! -f /src/web/assets/freedoom
     fi \
  && ls -lh /src/web/assets/freedoom1.wad /src/web/assets/freedoom2.wad
 
-# --- Native host tools (lemon, re2c) ---------------------------------------
+# --- Build ------------------------------------------------------------------
 # UZDoom invokes `lemon` (parser generator) and `re2c` (lexer generator) at
 # build time to turn .lemon / .re source into C/C++. They must run on the
-# BUILD host (Linux, inside this container) — not the TARGET (WASM). The
-# repo ships pre-built Windows .exe binaries in tools-native/ for local
-# Windows dev, but those can't execute in a Linux container. Build fresh
-# Linux ELF binaries from the in-tree source before we cross-compile.
-RUN cmake -S /src/tools/lemon -B /native-build/lemon \
-          -G Ninja -DCMAKE_BUILD_TYPE=Release \
- && cmake --build /native-build/lemon \
- && cmake -S /src/tools/re2c  -B /native-build/re2c  \
-          -G Ninja -DCMAKE_BUILD_TYPE=Release \
- && cmake --build /native-build/re2c \
- && /native-build/lemon/lemon -? >/dev/null 2>&1 || true \
- && /native-build/re2c/re2c --version
-
-# Overwrite ImportExecutables.cmake to point at the Linux binaries we just
-# built. Without this, the cross-compile step would try to exec the Windows
-# .exe files that ship in tools-native/ for local Windows dev, and fail
-# with "not found" inside the Linux container.
-RUN printf '%s\n' \
-  'if(NOT TARGET re2c)' \
-  '    add_executable(re2c IMPORTED)' \
-  '    set_target_properties(re2c PROPERTIES IMPORTED_LOCATION "/native-build/re2c/re2c")' \
-  'endif()' \
-  'if(NOT TARGET lemon)' \
-  '    add_executable(lemon IMPORTED)' \
-  '    set_target_properties(lemon PROPERTIES IMPORTED_LOCATION "/native-build/lemon/lemon")' \
-  'endif()' \
-  > /src/tools-native/ImportExecutables.cmake
-
+# BUILD host (Linux, inside this container) — not the TARGET (WASM), and the
+# .exe binaries in tools-native/ are Windows-only. build-wasm.sh detects a
+# non-Windows host and builds Linux ELF copies itself, so nothing extra is
+# needed here.
+#
 # The emscripten/emsdk base image sets EMSDK=/emsdk, puts emcc on PATH,
 # and pre-populates EMSDK_NODE / EMSDK_PYTHON. Our build-wasm.sh picks
 # those up via its OS-detection path.

@@ -12,7 +12,7 @@ Default port: 8080. Default served dir: ../build-wasm/ relative to this file.
 """
 import os
 import sys
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 
 class CrossOriginIsolatedHandler(SimpleHTTPRequestHandler):
@@ -57,7 +57,9 @@ def main():
     os.chdir(serve_dir)
     print(f'Serving {serve_dir} on http://localhost:{port}')
     print('(COOP/COEP/CORP headers enabled — SharedArrayBuffer will work.)')
-    HTTPServer(('0.0.0.0', port), CrossOriginIsolatedHandler).serve_forever()
+    # Threading: the engine's worker threads fetch assets in parallel, and a
+    # single-threaded server serializes them into a very slow cold load.
+    ThreadingHTTPServer(('0.0.0.0', port), CrossOriginIsolatedHandler).serve_forever()
 
 
 if __name__ == '__main__':

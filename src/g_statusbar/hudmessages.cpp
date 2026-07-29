@@ -51,20 +51,21 @@
 // These messages are how Brutal Doom (and similar mods) paint damage-
 // indicator overlays — PAIN1, XBREAK, RBLD1/2, BREAK1/2/S, PBUL*, etc.
 //
-// Default is OFF in this WASM build: side-by-side comparison vs native
-// UZDoom showed that the GLES2/WebGL backend renders these overlays
-// significantly more pronounced (covering large screen areas) than the
-// native build's subtle gradient bars. Until the underlying render
-// divergence is root-caused, we hide the overlays by default and the
-// engine's own V_DrawBlend damage flash (controlled by
-// blood_fade_scalar) provides the damage indicator. Set this CVar to
-// true to re-enable the overlays if you want the broken-but-loud BD
-// look back.
-CVARD(Bool, hud_picfont_messages, false,
+// This defaulted to OFF while these overlays rendered as near-opaque
+// slabs of red that buried the whole view. That turned out not to be a
+// GLES2 blending divergence — blending is correct; the cause was
+// hud_idzero_stack_cap grouping its cap per font, which left Brutal
+// Doom's ~20 distinct overlay graphics free to stack ~80 deep over the
+// same pixels (see shared_sbar.cpp). With the cap now applied across all
+// pic fonts collectively, the overlays composite the way the mod intends
+// and the view stays readable underneath, so they're on by default.
+// Set to false to hide them and rely on the engine's own V_DrawBlend
+// damage flash (blood_fade_scalar) instead.
+CVARD(Bool, hud_picfont_messages, true,
 	CVAR_ARCHIVE | CVAR_GLOBALCONFIG,
 	"Show pic-font HUD overlay messages (e.g. Brutal Doom's PAIN1/"
-	"XBREAK/RBLD damage bars). Default off in WASM build because they "
-	"render more pronounced than native UZDoom; set true to re-enable.")
+	"XBREAK/RBLD damage bars). Set false to hide them and use only the "
+	"engine's own damage flash.")
 
 IMPLEMENT_CLASS(DHUDMessageBase, false, true)
 IMPLEMENT_POINTERS_START(DHUDMessageBase)
