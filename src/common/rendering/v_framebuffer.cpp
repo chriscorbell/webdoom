@@ -258,6 +258,12 @@ void DFrameBuffer::FPSLimit()
 	if (vid_maxfps <= 0 || cl_capfps)
 		return;
 
+#ifdef __EMSCRIPTEN__
+	// requestAnimationFrame paces frames to the display, and sleeping on
+	// the browser's main thread is a busy loop.
+	return;
+#endif
+
 	uint64_t targetWakeTime = fpsLimitTime + 1'000'000 / vid_maxfps;
 
 	while (true)

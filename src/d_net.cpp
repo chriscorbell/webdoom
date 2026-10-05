@@ -1846,6 +1846,13 @@ static void TicStabilityWait()
 	using namespace std::chrono;
 	using namespace std::this_thread;
 
+#ifdef __EMSCRIPTEN__
+	// The browser presents frames on requestAnimationFrame, so evening out
+	// frame times buys nothing there, and this spin would block the page's
+	// main thread (input, audio scheduling) on every frame without a tic.
+	return;
+#endif
+
 	if (!r_ticstability)
 		return;
 
@@ -1874,6 +1881,42 @@ static void TicStabilityEnd()
 //
 // TryRunTics
 //
+static bool ShouldWaitForTic()
+{
+	bool doWait = (cl_capfps || pauseext || (r_NoInterpolate && !M_IsAnimated()));
+
+	if (vid_dontdowait && ((vid_maxfps > 0) || (vid_vsync == true)))
+		doWait = false;
+
+	if (!AppActive && vid_lowerinbackground)
+		doWait = true;
+
+	return doWait;
+}
+
+#ifdef __EMSCRIPTEN__
+//==========================================================================
+//
+// Net_TicDue
+//
+// When the frame rate is capped (menus, console, pause, cl_capfps),
+// TryRunTics blocks in I_WaitForTic until the next tic. On the browser's
+// main thread that sleep is a busy loop, which pins a core and starves
+// input and audio. The Emscripten main loop asks this first and skips
+// frames with nothing due; requestAnimationFrame calls back again shortly.
+//
+//==========================================================================
+
+bool Net_TicDue()
+{
+	if (!ShouldWaitForTic())
+		return true;
+
+	I_SetFrameTime();
+	return I_GetTime() > oldentertics;
+}
+#endif
+
 void TryRunTics (void)
 {
 	int 		i;
@@ -1883,13 +1926,7 @@ void TryRunTics (void)
 	int 		counts;
 	int 		numplaying;
 
-	bool doWait = (cl_capfps || pauseext || (r_NoInterpolate && !M_IsAnimated()));
-
-	if (vid_dontdowait && ((vid_maxfps > 0) || (vid_vsync == true)))
-		doWait = false;
-
-	if (!AppActive && vid_lowerinbackground)
-		doWait = true;
+	bool doWait = ShouldWaitForTic();
 
 	// get real tics
 	if (doWait)
