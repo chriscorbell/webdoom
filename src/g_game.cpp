@@ -2390,6 +2390,10 @@ static void PutSavePic (FileWriter *file, int width, int height)
 	}
 }
 
+#ifdef __EMSCRIPTEN__
+extern "C" void uzdoom_game_saved();
+#endif
+
 void G_DoSaveGame (bool okForQuicksave, bool forceQuicksave, FString filename, const char *description)
 {
 	TArray<FCompressedBuffer> savegame_content;
@@ -2525,6 +2529,10 @@ void G_DoSaveGame (bool okForQuicksave, bool forceQuicksave, FString filename, c
 
 		if (longsavemessages) Printf("%s (%s)\n", GStrings.GetString("GGSAVED"), filename.GetChars());
 		else Printf("%s\n", GStrings.GetString("GGSAVED"));
+
+#ifdef __EMSCRIPTEN__
+		uzdoom_game_saved();
+#endif
 	}
 	else
 	{
