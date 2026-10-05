@@ -126,6 +126,15 @@ void OpenGLFrameBuffer::InitializeState()
 
 	InitGLES();
 
+	if (gles.glsl300es)
+	{
+		// main.vp declares 'in uvec4 aBoneSelector'. Vertex formats without bone
+		// data leave that array disabled, and WebGL2 fails the draw call if the
+		// generic attribute value's type (float by default) doesn't match the
+		// shader's unsigned type. Generic values are context state, so set it once.
+		glVertexAttribI4ui(VATTR_BONESELECTOR, 0, 0, 0, 0);
+	}
+
 	// Move some state to the framebuffer object for easier access.
 	hwcaps = gles.flags;
 	vendorstring = gles.vendorstring;

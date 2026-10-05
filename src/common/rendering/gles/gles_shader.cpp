@@ -268,7 +268,7 @@ bool FShader::Load(const char * name, const char * vert_prog_lump_, const char *
 		uniform vec4 lights[MAXIMUM_LIGHT_VECTORS];
 
 		// bone matrix buffers
-		uniform mat4 bones[MAXIMUM_LIGHT_VECTORS];
+		uniform mat4 bones[MAXIMUM_BONES];
 
 		uniform	mat4 ProjectionMatrix;
 		uniform	mat4 ViewMatrix;
@@ -399,11 +399,28 @@ bool FShader::Load(const char * name, const char * vert_prog_lump_, const char *
 
 	unsigned int lightbuffersize = screen->mLights->GetBlockSize();
 
-	vp_comb.Format("#version %s\n\n#define NO_CLIPDISTANCE_SUPPORT\n", gles.shaderVersionString);
+	FString fp_comb;
+	if (gles.glsl300es)
+	{
+		// The shader sources are written in GLSL ES 1.00 style. Map the
+		// renamed qualifiers and builtins onto their GLSL ES 3.00 forms.
+		vp_comb = "#version 300 es\n\n#define NO_CLIPDISTANCE_SUPPORT\n";
+		fp_comb = vp_comb;
+		vp_comb << "#define attribute in\n#define varying out\n#define texture2D texture\n";
+		fp_comb << "#define varying in\n#define texture2D texture\n#define gl_FragColor FragColor\n";
+	}
+	else
+	{
+		vp_comb.Format("#version %s\n\n#define NO_CLIPDISTANCE_SUPPORT\n", gles.shaderVersionString);
+		fp_comb = vp_comb;
+	}
 
-	FString fp_comb = vp_comb;
 	vp_comb << defines << i_data.GetChars();
 	fp_comb << "$placeholder$\n" << defines << i_data.GetChars();
+	if (gles.glsl300es)
+	{
+		fp_comb << "out vec4 FragColor;\n";
+	}
 
 	vp_comb << "#line 1\n";
 	fp_comb << "#line 1\n";
@@ -684,7 +701,9 @@ bool FShader::Bind(ShaderFlavourData& flavour)
 	{
 		FString variantConfig = "\n";
 
-		variantConfig.AppendFormat("#define MAXIMUM_LIGHT_VECTORS %d\n", gles.numlightvectors);
+		// GLSL ES 3.00: lights[0] is a header with the light ranges, the light data follows it.
+		variantConfig.AppendFormat("#define MAXIMUM_LIGHT_VECTORS %d\n", gles.numlightvectors + (gles.glsl300es ? 1 : 0));
+		variantConfig.AppendFormat("#define MAXIMUM_BONES %d\n", gles.maxbones);
 		variantConfig.AppendFormat("#define DEF_TEXTURE_MODE %d\n", flavour.textureMode);
 		variantConfig.AppendFormat("#define DEF_TEXTURE_FLAGS %d\n", flavour.texFlags);
 		variantConfig.AppendFormat("#define DEF_BLEND_FLAGS %d\n", flavour.blendFlags & 0x7);
@@ -696,19 +715,31 @@ bool FShader::Bind(ShaderFlavourData& flavour)
 
 		variantConfig.AppendFormat("#define DEF_DO_DESATURATE %d\n", flavour.doDesaturate);
 
+		if (gles.glsl300es)
+		{
+			// One variant for all lit surfaces: the shader reads the
+			// modulated/subtractive/additive ranges from lights[0] and loops
+			// over them, so mod/sub/add/spot don't need separate programs.
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS %d\n", flavour.dynLightsMod);
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_MOD 0\n");
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_SUB 0\n");
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_ADD 0\n");
+		}
+		else
+		{
 #ifdef __EMSCRIPTEN__
-		// WebGL's strict GLSL ES 1.00 rejects uniform-bounded loops and
-		// uniform-indexed access into the lights[] array. Disable dyn
-		// lights on the web for now — vanilla Doom / Freedoom don't need
-		// them, and a proper fix requires #version 300 es (shader rewrite).
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_MOD 0\n");
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_SUB 0\n");
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_ADD 0\n");
+			// WebGL's strict GLSL ES 1.00 rejects uniform-bounded loops and
+			// uniform-indexed access into the lights[] array, so the GLSL ES
+			// 1.00 fallback (gles_force_glsl_v100) has no dynamic lights.
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_MOD 0\n");
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_SUB 0\n");
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_ADD 0\n");
 #else
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_MOD %d\n", flavour.dynLightsMod);
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_SUB %d\n", flavour.dynLightsSub);
-		variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_ADD %d\n", flavour.dynLightsAdd);
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_MOD %d\n", flavour.dynLightsMod);
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_SUB %d\n", flavour.dynLightsSub);
+			variantConfig.AppendFormat("#define DEF_DYNAMIC_LIGHTS_ADD %d\n", flavour.dynLightsAdd);
 #endif
+		}
 
 		variantConfig.AppendFormat("#define DEF_USE_OBJECT_COLOR_2 %d\n", flavour.useObjectColor2);
 		variantConfig.AppendFormat("#define DEF_USE_GLOW_TOP_COLOR %d\n", flavour.useGlowTopColor);

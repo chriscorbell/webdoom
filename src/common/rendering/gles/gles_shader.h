@@ -362,6 +362,14 @@ public: class ShaderVariantData
 		int normalmodelmatrix_index = 0;
 		int texturematrix_index = 0;
 
+		// What was last uploaded to this program's lights[] / bones[] arrays
+		// (buffer generation + index), so repeated draws can skip the upload.
+		unsigned int lightUploadGeneration = ~0u;
+		int lightUploadIndex = -1;
+		unsigned int boneUploadGeneration = ~0u;
+		int boneUploadIndex = -1;
+		int boneUploadCount = 0;
+
 		int currentglowstate = 0;
 		int currentgradientstate = 0;
 		int currentsplitstate = 0;

@@ -169,8 +169,10 @@ namespace OpenGLESRenderer
 
 		gles.useMappedBuffers = gles_use_mapped_buffer;
 		gles.forceGLSLv100 = gles_force_glsl_v100;
+		gles.glsl300es = false;
 		gles.maxlights = gles_max_lights_per_surface;
 		gles.numlightvectors = (gles.maxlights * LIGHT_VEC4_NUM);
+		gles.maxbones = gles.numlightvectors; // legacy sizing, see below for GLSL ES 3.00
 
 		gles.modelstring = (char*)glGetString(GL_RENDERER);
 		gles.vendorstring = (char*)glGetString(GL_VENDOR);
@@ -220,6 +222,10 @@ namespace OpenGLESRenderer
 			// array bone uploads even though glesMode lands on GLES (the ES-
 			// 3.0-reporting version string matches the GLES-mode sniff above).
 			gles.es3VertexFeatures = true;
+			// Compile the material shaders as GLSL ES 3.00 so dynamic lights
+			// and bones work. gles_force_glsl_v100 falls back to the old
+			// GLSL ES 1.00 path (no dynamic lights on geometry).
+			gles.glsl300es = !gles.forceGLSLv100;
 #endif
 		}
 		else if (gles.glesMode == GLES_MODE_OGL2)
@@ -246,7 +252,31 @@ namespace OpenGLESRenderer
 			gles.anistropicFilterAvailable = true;
 			gles.es3VertexFeatures = true;
 		}
-		
+
+		if (gles.glsl300es)
+		{
+			// Size the lights[] (fragment) and bones[] (vertex) uniform arrays
+			// to what the implementation can hold. WebGL2 only guarantees 224
+			// fragment and 256 vertex uniform vectors; desktop ANGLE usually
+			// exposes 1024+. Keep ~64 vectors per stage for the other uniforms.
+			const int reserve = 64;
+			GLint maxVSVectors = 256, maxFSVectors = 224;
+			glGetIntegerv(GL_MAX_VERTEX_UNIFORM_VECTORS, &maxVSVectors);
+			glGetIntegerv(GL_MAX_FRAGMENT_UNIFORM_VECTORS, &maxFSVectors);
+
+			// lights[] holds one header vec4 (light ranges) + LIGHT_VEC4_NUM vec4s per light.
+			int fitLights = max(0, (maxFSVectors - reserve - 1) / LIGHT_VEC4_NUM);
+			if ((int)gles.maxlights > fitLights) gles.maxlights = fitLights;
+			gles.numlightvectors = gles.maxlights * LIGHT_VEC4_NUM;
+
+			// bones[] is uploaded per model (see ApplyLightsAndBones300), so it
+			// only needs one skeleton. 128 matches the legacy size.
+			gles.maxbones = clamp((maxVSVectors - reserve) / 4, 1, 128);
+
+			Printf("GLES: GLSL ES 3.00 material shaders, uniform vectors VS %d / FS %d, %u lights per surface, %u bones\n",
+				maxVSVectors, maxFSVectors, gles.maxlights, gles.maxbones);
+		}
+
 		setGlVersion(glVersion);
 	}
 }

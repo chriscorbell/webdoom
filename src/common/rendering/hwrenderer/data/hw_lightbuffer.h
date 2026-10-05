@@ -23,6 +23,7 @@ class FLightBuffer
 	unsigned int mBufferSize;
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
+	unsigned int mGeneration = 0;	// bumped by Clear(); lets backends cache uploads per buffer fill
 
 	void CheckSize();
 
@@ -37,6 +38,7 @@ public:
 	unsigned int GetBlockSize() const { return mBlockSize; }
 	bool GetBufferType() const { return mBufferType; }
 	int GetBinding(unsigned int index, size_t* pOffset, size_t* pSize);
+	unsigned int GetGeneration() const { return mGeneration; }
 
 	// OpenGL needs the buffer to mess around with the binding.
 	IDataBuffer* GetBuffer() const

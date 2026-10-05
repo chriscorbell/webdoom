@@ -22,6 +22,7 @@ class BoneBuffer
 	unsigned int mBufferSize;
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
+	unsigned int mGeneration = 0;	// bumped by Clear(); lets backends cache uploads per buffer fill
 
 public:
 	BoneBuffer(int pipelineNbr = 1);
@@ -37,6 +38,7 @@ public:
 
 	// Only for GLES to determin how much data is in the buffer
 	int GetCurrentIndex() { return mIndex; };
+	unsigned int GetGeneration() const { return mGeneration; }
 
 	// OpenGL needs the buffer to mess around with the binding.
 	IDataBuffer* GetBuffer() const

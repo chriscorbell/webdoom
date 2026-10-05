@@ -58,7 +58,10 @@ class FGLRenderState final : public FRenderState
 	int mNumDrawBuffers = 1;
 
 	bool ApplyShader();
+	void ApplyLightsAndBones300(const float* lightHeader, int modLights, int subLights, int addLights);
 	void ApplyState();
+
+	TArray<float> mLightUploadStaging;
 
 	// Texture binding state
 	FMaterial *lastMaterial = nullptr;

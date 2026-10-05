@@ -101,6 +101,11 @@ namespace OpenGLESRenderer
 		bool depthClampAvailable;
 		bool anistropicFilterAvailable;
 		bool es3VertexFeatures;
+		// Material shaders are compiled as GLSL ES 3.00 (WebGL2). Enables
+		// per-pixel dynamic lights (uniform-bounded loops / dynamic indexing
+		// into lights[]) and skeletal animation in main.vp.
+		bool glsl300es;
+		unsigned int maxbones;	// size of the bones[] uniform array (mat4s)
 		int glesMode;
 		const char* shaderVersionString;
 		int max_texturesize;
