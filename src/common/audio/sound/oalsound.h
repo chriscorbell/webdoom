@@ -157,6 +157,7 @@ private:
     void RemoveStream(OpenALSoundStream *stream);
 
 	void LoadReverb(const ReverbContainer *env);
+	void SetStartOffset(ALuint source, SoundHandle sfx, int chanflags, FISoundChannel *reuse_chan, float startTime);
 	void PurgeStoppedSources();
 	static FSoundChan *FindLowestChannel();
 

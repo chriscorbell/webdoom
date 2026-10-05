@@ -1470,6 +1470,55 @@ SoundStream *OpenALSoundRenderer::CreateStream(SoundStreamCallback callback, int
 	return stream;
 }
 
+// Seeks a source that has just had its buffer attached to where the sound
+// should start: startTime for a new sound, or the saved position of a sound
+// being resumed (savegame load, snd_reset, an evicted looping sound coming
+// back).
+//
+// This must run after AL_BUFFER is set. OpenAL Soft just stores an offset
+// set on a stopped source and applies it at play time, but Emscripten's
+// OpenAL validates it immediately against the attached data and rejects any
+// non-zero offset on a source with no buffer (AL_INVALID_VALUE). That error
+// was hidden behind the AL_INVALID_ENUM still pending from the unsupported
+// per-source AL_DOPPLER_FACTOR (AL errors are sticky until read), so the
+// seek was silently dropped and every resumed sound restarted from 0.
+//
+// Offsets for looping sounds wrap around the sound's length. An offset the
+// buffer still can't satisfy is dropped and the sound plays from the start,
+// matching what OpenAL Soft does with an out-of-range stored offset. The
+// offset is always set, even to 0, so a recycled source never inherits a
+// stale seek position.
+void OpenALSoundRenderer::SetStartOffset(ALuint source, SoundHandle sfx, int chanflags, FISoundChannel *reuse_chan, float startTime)
+{
+	const bool loop = (chanflags & SNDF_LOOP) != 0;
+	const float sfxlength = (float)GetMSLength(sfx) / 1000.f;
+
+	if(!reuse_chan || reuse_chan->StartTime == 0)
+	{
+		float st = loop ? (sfxlength > 0 ? fmod(startTime, sfxlength) : 0.f)
+		                : clamp<float>(startTime, 0.f, sfxlength);
+		alSourcef(source, AL_SEC_OFFSET, st);
+	}
+	else if((chanflags&SNDF_ABSTIME))
+	{
+		ALint pos = ALint(reuse_chan->StartTime);
+		const ALint samples = (ALint)GetSampleLength(sfx);
+		if(loop && samples > 0) pos %= samples;
+		alSourcei(source, AL_SAMPLE_OFFSET, pos);
+	}
+	else
+	{
+		float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
+			std::chrono::steady_clock::now().time_since_epoch() -
+			std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
+		).count();
+		if(loop && sfxlength > 0) offset = fmod(offset, sfxlength);
+		alSourcef(source, AL_SEC_OFFSET, max(offset, 0.f));
+	}
+	// Out-of-range offset: keep playing from the start (see above).
+	alGetError();
+}
+
 FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, float pitch, int chanflags, FISoundChannel *reuse_chan, float startTime)
 {
 	if(FreeSfx.Size() == 0)
@@ -1522,24 +1571,6 @@ FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, floa
 	else
 		alSourcef(source, AL_PITCH, pitch);
 
-	if(!reuse_chan || reuse_chan->StartTime == 0)
-	{
-		float st = (chanflags&SNDF_LOOP) ? fmod(startTime, (float)GetMSLength(sfx) / 1000.f) : clamp<float>(startTime, 0.f, (float)GetMSLength(sfx) / 1000.f);
-		alSourcef(source, AL_SEC_OFFSET, st);
-	}
-	else
-	{
-		if((chanflags&SNDF_ABSTIME))
-			alSourcei(source, AL_SAMPLE_OFFSET, ALint(reuse_chan->StartTime));
-		else
-		{
-			float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
-				std::chrono::steady_clock::now().time_since_epoch() -
-				std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
-			).count();
-			if(offset > 0.f) alSourcef(source, AL_SEC_OFFSET, offset);
-		}
-	}
 	{
 		ALenum e1 = getALError();
 		if(e1 != AL_NO_ERROR)
@@ -1549,6 +1580,9 @@ FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, floa
 	}
 
 	alSourcei(source, AL_BUFFER, buffer);
+	if(getALError() != AL_NO_ERROR)
+		return NULL;
+	SetStartOffset(source, sfx, chanflags, reuse_chan, startTime);
 	if((chanflags&SNDF_NOPAUSE) || !SFXPaused)
 		alSourcePlay(source);
 	{
@@ -1700,27 +1734,6 @@ FISoundChannel *OpenALSoundRenderer::StartSound3D(SoundHandle sfx, SoundListener
 	else
 		alSourcef(source, AL_PITCH, pitch);
 
-	if(!reuse_chan || reuse_chan->StartTime == 0)
-	{
-		float sfxlength = (float)GetMSLength(sfx) / 1000.f;
-		float st = (chanflags & SNDF_LOOP)
-				? (sfxlength > 0 ? fmod(startTime, sfxlength) : 0)
-				: clamp<float>(startTime, 0.f, sfxlength);
-		alSourcef(source, AL_SEC_OFFSET, st);
-	}
-	else
-	{
-		if((chanflags&SNDF_ABSTIME))
-			alSourcei(source, AL_SAMPLE_OFFSET, ALint(reuse_chan->StartTime));
-		else
-		{
-			float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
-				std::chrono::steady_clock::now().time_since_epoch() -
-				std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
-			).count();
-			if(offset > 0.f) alSourcef(source, AL_SEC_OFFSET, offset);
-		}
-	}
 	{
 		ALenum e1 = getALError();
 		if(e1 != AL_NO_ERROR)
@@ -1730,6 +1743,9 @@ FISoundChannel *OpenALSoundRenderer::StartSound3D(SoundHandle sfx, SoundListener
 	}
 
 	alSourcei(source, AL_BUFFER, buffer);
+	if(getALError() != AL_NO_ERROR)
+		return NULL;
+	SetStartOffset(source, sfx, chanflags, reuse_chan, startTime);
 	if((chanflags&SNDF_NOPAUSE) || !SFXPaused)
 		alSourcePlay(source);
 	{
