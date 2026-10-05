@@ -353,9 +353,9 @@
   // ---- Launch buttons ----------------------------------------------------
 
   $('useFreedoomBtn').addEventListener('click', () => {
-    // Bundled via --preload-file at build time; engine sees it at /freedoom1.wad.
+    // Served next to the page and downloaded at launch (fetchBundledIwad).
     state.iwad = { name: 'freedoom1.wad (bundled)', data: null, bundled: 'freedoom1.wad' };
-    $('iwadDesc').textContent = 'freedoom1.wad (bundled — 12 MB)';
+    $('iwadDesc').textContent = 'freedoom1.wad (bundled, downloaded at launch)';
     $('iwadPicker').classList.add('filled');
     $('launchBtn').disabled = false;
     setStatus('Ready to launch with Freedoom.');
@@ -522,6 +522,9 @@
   function writeUserFiles() {
     const args = [];
     if (state.iwad && state.iwad.bundled) {
+      if (!fsExists('/' + state.iwad.bundled)) {
+        throw new Error('Could not download ' + state.iwad.bundled + '. Check the connection and try again.');
+      }
       args.push('-iwad', '/' + state.iwad.bundled);
     } else if (state.iwad && state.iwad.persisted) {
       // Launcher-URL path: IWAD was uploaded in a previous session and
@@ -581,8 +584,6 @@
     { url: 'lights.pk3',              fs: '/lights.pk3' },
     { url: 'game_widescreen_gfx.pk3', fs: '/game_widescreen_gfx.pk3' },
     { url: 'soundfonts/uzdoom.sf2',   fs: '/soundfonts/uzdoom.sf2' },
-    { url: 'fm_banks/GENMIDI.GS.wopl',                         fs: '/fm_banks/GENMIDI.GS.wopl' },
-    { url: 'fm_banks/gs-by-papiezak-and-sneakernets.wopn',     fs: '/fm_banks/gs-by-papiezak-and-sneakernets.wopn' },
   ];
 
   function renderAssetList(assets) {
@@ -711,6 +712,23 @@
     }
   }
 
+  // Freedoom ships as plain files next to the page rather than preloaded
+  // into uzdoom.data, so only players who pick it download it.
+  async function fetchBundledIwad() {
+    if (!state.iwad || !state.iwad.bundled) return;
+    const name = state.iwad.bundled;
+    const url = 'freedoom/' + name;
+    setStatus(`Fetching ${name}…`);
+    try {
+      const buf = await fetchWithProgress(Module.locateFile ? Module.locateFile(url) : url, (recv, total) => {
+        setStatusRight(total > 0 ? `${name}: ${(recv / total * 100).toFixed(0)}%` : `${name}: ${formatBytes(recv)}`);
+      });
+      FS.writeFile('/' + name, buf);
+    } catch (e) {
+      console.warn(`[uzdoom-loader] could not fetch ${name}:`, e);
+    }
+  }
+
   function bootEngine() {
     mountFilesystems();
     setStatus('Syncing saves from IndexedDB…');
@@ -718,6 +736,8 @@
       if (err) console.warn('syncfs pull:', err);
       try { await fetchCoreAssets(); }
       catch (e) { console.error('core asset fetch failed', e); }
+
+      await fetchBundledIwad();
 
       // Fetch any launch-referenced files that are side-loaded on the
       // server but not yet cached in IDBFS (first-run path).
@@ -930,9 +950,8 @@
   //
   // Wipes IDBFS-backed IndexedDB databases. This lets users recover from a
   // stuck state ("my Brutal Doom save broke the game, how do I start
-  // over?") without needing to dig through DevTools. We don't touch the
-  // bundled preload-file blobs — those are part of the wasm-data and
-  // regenerate on reload automatically.
+  // over?") without needing to dig through DevTools. Bundled Freedoom and
+  // the engine's own files are served by the page, so they're unaffected.
 
   $('resetBtn').addEventListener('click', () => {
     $('resetModal').classList.remove('hidden');

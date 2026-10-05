@@ -42,7 +42,9 @@ jobs:
       # defensively — harmless if already lower.
       - name: Compute lowercase image name
         id: name
-        run: echo "image=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "describe=webdoom-g${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -77,6 +79,9 @@ jobs:
         with:
           context: .
           push: true
+          # Shown as the engine's version (console, startup log, savegames).
+          build-args: |
+            GIT_DESCRIBE=${{ steps.name.outputs.describe }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

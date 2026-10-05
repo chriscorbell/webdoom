@@ -1467,6 +1467,19 @@ if( EMSCRIPTEN )
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		${CMAKE_SOURCE_DIR}/web/uzdoom-melt.js $<TARGET_FILE_DIR:zdoom>/uzdoom-melt.js
 	)
+
+	# Freedoom, if dropped into web/assets/, is served as plain files that
+	# the loader fetches only when a player picks it. Preloading it into
+	# uzdoom.data made every first visit download ~57 MB, even on a
+	# deployment that boots another game.
+	foreach( _freedoom freedoom1.wad freedoom2.wad )
+		if( EXISTS "${CMAKE_SOURCE_DIR}/web/assets/${_freedoom}" )
+			add_custom_command(TARGET zdoom POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				${CMAKE_SOURCE_DIR}/web/assets/${_freedoom} $<TARGET_FILE_DIR:zdoom>/freedoom/${_freedoom}
+			)
+		endif()
+	endforeach()
 endif()
 
 if (VCPKG_TOOLCHAIN)
