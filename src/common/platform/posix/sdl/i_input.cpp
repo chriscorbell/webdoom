@@ -45,6 +45,7 @@
 #include "utf8.h"
 #include "keydef.h"
 #include "i_interface.h"
+#include "m_joy.h"
 #include "engineerrors.h"
 #include "i_interface.h"
 
@@ -190,6 +191,12 @@ void I_ReleaseMouseCapture()
 	SDL_SetRelativeMouseMode (SDL_FALSE);
 }
 
+#ifdef __EMSCRIPTEN__
+double I_CanvasPixelRatio();
+int I_GamepadButtonKey(SDL_JoystickID which, int button);
+void I_RescanJoysticks();
+#endif
+
 static void MouseRead ()
 {
 	int x, y;
@@ -200,6 +207,19 @@ static void MouseRead ()
 	}
 
 	SDL_GetRelativeMouseState (&x, &y);
+#ifdef __EMSCRIPTEN__
+	// SDL scales pointer-lock movement by the canvas's drawing-buffer to
+	// CSS size ratio, which vid_hidpi raises to the screen's pixel density.
+	// Undo it so mouse sensitivity doesn't depend on the display.
+	static double residualX, residualY;
+	const double ratio = I_CanvasPixelRatio();
+	residualX += x / ratio;
+	residualY += y / ratio;
+	x = int(residualX);
+	y = int(residualY);
+	residualX -= x;
+	residualY -= y;
+#endif
 	PostMouseMove (x, y);
 }
 
@@ -465,10 +485,26 @@ void MessagePump (const SDL_Event &sev)
 	case SDL_JOYBUTTONDOWN:
 	case SDL_JOYBUTTONUP:
 		event.type = sev.type == SDL_JOYBUTTONDOWN ? EV_KeyDown : EV_KeyUp;
+#ifdef __EMSCRIPTEN__
+		event.data1 = I_GamepadButtonKey(sev.jbutton.which, sev.jbutton.button);
+#else
 		event.data1 = KEY_FIRSTJOYBUTTON + sev.jbutton.button;
+#endif
 		if(event.data1 != 0)
 			D_PostEvent(&event);
 		break;
+
+#ifdef __EMSCRIPTEN__
+	case SDL_JOYDEVICEADDED:
+	case SDL_JOYDEVICEREMOVED:
+		// A browser reveals a gamepad only when one of its buttons is
+		// pressed, so the player means to use it, whatever an older saved
+		// config says.
+		if (sev.type == SDL_JOYDEVICEADDED && !use_joystick)
+			use_joystick = true;
+		I_RescanJoysticks();
+		break;
+#endif
 	}
 }
 

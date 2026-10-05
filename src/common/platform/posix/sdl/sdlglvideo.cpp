@@ -136,6 +136,25 @@ namespace Priv
 	int numberOfDisplays;
 	SDL_Rect* displayBounds = nullptr;
 
+#ifdef __EMSCRIPTEN__
+	// The canvas's CSS box in device pixels. CSS sizes the canvas (100vw x
+	// 100vh) and the window, i.e. the drawing buffer, follows it. Reading
+	// clientWidth/clientHeight rather than window.innerWidth or a cached
+	// canvas.width keeps this right when docked DevTools shrink the
+	// viewport. With vid_hidpi the buffer matches the screen's pixel
+	// density instead of CSS pixels, which the browser would upscale and
+	// blur on HiDPI screens; SDL scales mouse coordinates by buffer/CSS
+	// size, so menus still line up.
+	bool canvasPixelSize(int &w, int &h);
+
+	void syncCanvasSize()
+	{
+		int w, h;
+		if (window && canvasPixelSize(w, h))
+			SDL_SetWindowSize(window, w, h);
+	}
+#endif
+
 	void updateDisplayInfo()
 	{
 		Priv::numberOfDisplays = SDL_GetNumVideoDisplays();
@@ -180,28 +199,13 @@ namespace Priv
 		}
 #ifdef __EMSCRIPTEN__
 		// In the browser the "display bounds" SDL reports is the user's full
-		// screen resolution, not the tab's viewport. What we actually want is
-		// the CSS-computed pixel box of the canvas element — `clientWidth` /
-		// `clientHeight`. `window.innerWidth` and the loader's cached
-		// `canvas.width` both go stale in Chrome/Brave when DevTools is docked
-		// (document viewport shrinks but the cached width doesn't).
-		// clientWidth is read post-CSS-layout so it always reflects what the
-		// user is actually seeing.
+		// screen resolution, not the tab's viewport: size to the canvas.
 		{
-			int viewportW = EM_ASM_INT({
-				var c = Module.canvas || document.getElementById('canvas');
-				if (c && c.clientWidth) return c.clientWidth | 0;
-				return window.innerWidth | 0;
-			});
-			int viewportH = EM_ASM_INT({
-				var c = Module.canvas || document.getElementById('canvas');
-				if (c && c.clientHeight) return c.clientHeight | 0;
-				return window.innerHeight | 0;
-			});
-			if (viewportW > 0 && viewportH > 0)
+			int w, h;
+			if (canvasPixelSize(w, h))
 			{
-				win_w = viewportW;
-				win_h = viewportH;
+				win_w = w;
+				win_h = h;
 			}
 		}
 #endif
@@ -231,20 +235,6 @@ namespace Priv
 			// Use clientWidth/clientHeight so docking DevTools (which shrinks
 			// the document viewport without firing `resize` on the loader's
 			// cached canvas.width) is handled correctly.
-			static auto syncCanvasSize = []() {
-				int w = EM_ASM_INT({
-					var c = Module.canvas || document.getElementById('canvas');
-					if (c && c.clientWidth) return c.clientWidth | 0;
-					return window.innerWidth | 0;
-				});
-				int h = EM_ASM_INT({
-					var c = Module.canvas || document.getElementById('canvas');
-					if (c && c.clientHeight) return c.clientHeight | 0;
-					return window.innerHeight | 0;
-				});
-				if (w > 0 && h > 0 && Priv::window)
-					SDL_SetWindowSize(Priv::window, w, h);
-			};
 			static auto resizeCb = [](int, const EmscriptenUiEvent *, void *) -> EM_BOOL {
 				syncCanvasSize();
 				return EM_TRUE;
@@ -319,6 +309,41 @@ namespace Priv
 	}
 }
 
+#ifdef __EMSCRIPTEN__
+CUSTOM_CVAR(Bool, vid_hidpi, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL)
+{
+	Priv::syncCanvasSize();
+}
+
+bool Priv::canvasPixelSize(int &w, int &h)
+{
+	double cssW = 0, cssH = 0;
+	emscripten_get_element_css_size("#canvas", &cssW, &cssH);
+	if (cssW <= 0 || cssH <= 0)
+	{
+		cssW = EM_ASM_INT({ return window.innerWidth | 0; });
+		cssH = EM_ASM_INT({ return window.innerHeight | 0; });
+	}
+	// Past 2x the extra pixels cost fill rate without visibly sharpening
+	// Doom's low-resolution art.
+	double ratio = vid_hidpi ? clamp(emscripten_get_device_pixel_ratio(), 1.0, 2.0) : 1.0;
+	w = int(cssW * ratio + 0.5);
+	h = int(cssH * ratio + 0.5);
+	return w > 0 && h > 0;
+}
+
+// Drawing-buffer pixels per CSS pixel, as the window currently stands.
+double I_CanvasPixelRatio()
+{
+	double cssW = 0, cssH = 0;
+	emscripten_get_element_css_size("#canvas", &cssW, &cssH);
+	int w = 0;
+	if (Priv::window)
+		SDL_GetWindowSize(Priv::window, &w, nullptr);
+	return (cssW > 0 && w > 0) ? w / cssW : 1.0;
+}
+#endif
+
 CUSTOM_CVAR(Int, vid_adapter, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL)
 {
   if (Priv::window != nullptr) {
@@ -338,20 +363,11 @@ CUSTOM_CVAR(Int, vid_adapter, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITC
 #ifdef __EMSCRIPTEN__
 		// Mirror CreateWindow: read the CSS-computed canvas box.
 		{
-			int viewportW = EM_ASM_INT({
-				var c = Module.canvas || document.getElementById('canvas');
-				if (c && c.clientWidth) return c.clientWidth | 0;
-				return window.innerWidth | 0;
-			});
-			int viewportH = EM_ASM_INT({
-				var c = Module.canvas || document.getElementById('canvas');
-				if (c && c.clientHeight) return c.clientHeight | 0;
-				return window.innerHeight | 0;
-			});
-			if (viewportW > 0 && viewportH > 0)
+			int w, h;
+			if (Priv::canvasPixelSize(w, h))
 			{
-				win_w = viewportW;
-				win_h = viewportH;
+				win_w = w;
+				win_h = h;
 			}
 		}
 #endif

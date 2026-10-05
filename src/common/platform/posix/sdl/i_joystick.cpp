@@ -46,6 +46,34 @@
 // Very small deadzone so that floating point magic doesn't happen
 #define MIN_DEADZONE 0.000001f
 
+#ifdef __EMSCRIPTEN__
+// Browsers report most gamepads in the Gamepad API's "standard" layout:
+// axes 0-3 are the two sticks, buttons 0-15 are A B X Y, bumpers, triggers,
+// back, start, stick clicks, then the d-pad. SDL doesn't pass the layout
+// name on, so recognise it by shape. Such pads get the pad_* keys (and
+// their default bindings) instead of the generic joyN ones, which assume a
+// desktop driver's layout and would put pause and the main menu on the
+// triggers.
+bool I_IsStandardGamepad(SDL_Joystick *joy)
+{
+	return joy && SDL_JoystickNumAxes(joy) == 4 && SDL_JoystickNumButtons(joy) >= 16;
+}
+
+static const int StandardGamepadKeys[16] = {
+	KEY_PAD_A, KEY_PAD_B, KEY_PAD_X, KEY_PAD_Y,
+	KEY_PAD_LSHOULDER, KEY_PAD_RSHOULDER, KEY_PAD_LTRIGGER, KEY_PAD_RTRIGGER,
+	KEY_PAD_BACK, KEY_PAD_START, KEY_PAD_LTHUMB, KEY_PAD_RTHUMB,
+	KEY_PAD_DPAD_UP, KEY_PAD_DPAD_DOWN, KEY_PAD_DPAD_LEFT, KEY_PAD_DPAD_RIGHT,
+};
+
+int I_GamepadButtonKey(SDL_JoystickID which, int button)
+{
+	if (button < 16 && I_IsStandardGamepad(SDL_JoystickFromInstanceID(which)))
+		return StandardGamepadKeys[button];
+	return KEY_FIRSTJOYBUTTON + button;
+}
+#endif
+
 class SDLInputJoystick: public IJoystickConfig
 {
 public:
@@ -56,6 +84,9 @@ public:
 		{
 			NumAxes = SDL_JoystickNumAxes(Device);
 			NumHats = SDL_JoystickNumHats(Device);
+#ifdef __EMSCRIPTEN__
+			Standard = I_IsStandardGamepad(Device);
+#endif
 
 			SetDefaultConfig();
 		}
@@ -132,7 +163,7 @@ public:
 	{
 		if(axis >= 5)
 			return Axes[axis].GameAxis == JOYAXIS_None;
-		return Axes[axis].GameAxis == DefaultAxes[axis];
+		return Axes[axis].GameAxis == DefaultAxis(axis);
 	}
 	bool IsAxisScaleDefault(int axis)
 	{
@@ -152,10 +183,7 @@ public:
 			info.Multiplier = 1.0f;
 			info.Value = 0.0;
 			info.ButtonValue = 0;
-			if(i >= 5)
-				info.GameAxis = JOYAXIS_None;
-			else
-				info.GameAxis = DefaultAxes[i];
+			info.GameAxis = DefaultAxis(i);
 			Axes.Push(info);
 		}
 	}
@@ -204,14 +232,24 @@ public:
 
 			// Map button to axis
 			// X and Y are handled differently so if we have 2 or more axes then we'll use that code instead.
-			if (NumAxes == 1 || (i >= 2 && i < NUM_JOYAXISBUTTONS))
+			if (!Standard && (NumAxes == 1 || (i >= 2 && i < NUM_JOYAXISBUTTONS)))
 			{
 				Joy_GenerateButtonEvents(Axes[i].ButtonValue, buttonstate, 2, KEY_JOYAXIS1PLUS + i*2);
 				Axes[i].ButtonValue = buttonstate;
 			}
 		}
 
-		if(NumAxes > 1)
+		if (Standard)
+		{
+			// Stick directions as the pad's thumbstick keys.
+			buttonstate = Joy_XYAxesToButtons(Axes[0].Value, Axes[1].Value);
+			Joy_GenerateButtonEvents(Axes[0].ButtonValue, buttonstate, 4, KEY_PAD_LTHUMB_RIGHT);
+			Axes[0].ButtonValue = buttonstate;
+			buttonstate = Joy_XYAxesToButtons(Axes[2].Value, Axes[3].Value);
+			Joy_GenerateButtonEvents(Axes[2].ButtonValue, buttonstate, 4, KEY_PAD_RTHUMB_RIGHT);
+			Axes[2].ButtonValue = buttonstate;
+		}
+		else if(NumAxes > 1)
 		{
 			buttonstate = Joy_XYAxesToButtons(Axes[0].Value, Axes[1].Value);
 			Joy_GenerateButtonEvents(Axes[0].ButtonValue, buttonstate, 4, KEY_JOYAXIS1PLUS);
@@ -263,6 +301,16 @@ protected:
 		uint8_t ButtonValue;
 	};
 	static const EJoyAxis DefaultAxes[5];
+	static const EJoyAxis StandardAxes[4];
+
+	EJoyAxis DefaultAxis(int i) const
+	{
+		if (Standard)
+			return i < 4 ? StandardAxes[i] : JOYAXIS_None;
+		return i < 5 ? DefaultAxes[i] : JOYAXIS_None;
+	}
+
+	bool				Standard = false;	// Gamepad API "standard" layout
 
 	int					DeviceIndex;
 	SDL_Joystick		*Device;
@@ -278,6 +326,7 @@ protected:
 
 // [Nash 4 Feb 2024] seems like on Linux, the third axis is actually the Left Trigger, resulting in the player uncontrollably looking upwards.
 const EJoyAxis SDLInputJoystick::DefaultAxes[5] = {JOYAXIS_Side, JOYAXIS_Forward, JOYAXIS_None, JOYAXIS_Yaw, JOYAXIS_Pitch};
+const EJoyAxis SDLInputJoystick::StandardAxes[4] = {JOYAXIS_Side, JOYAXIS_Forward, JOYAXIS_Yaw, JOYAXIS_Pitch};
 
 class SDLInputJoystickManager
 {
@@ -330,6 +379,18 @@ void I_StartupJoysticks()
 		JoystickManager = new SDLInputJoystickManager();
 #endif
 }
+
+#ifdef __EMSCRIPTEN__
+// Browsers reveal a gamepad only once a button is pressed on the focused
+// page, long after startup, so rebuild the list when SDL reports a change.
+void I_RescanJoysticks()
+{
+	if (!JoystickManager)
+		return;
+	delete JoystickManager;
+	JoystickManager = new SDLInputJoystickManager();
+}
+#endif
 void I_ShutdownInput()
 {
 	if(JoystickManager)
