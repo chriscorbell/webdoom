@@ -84,7 +84,9 @@ extern "C" zmusic_bool ZMusic_WriteSMF(ZMusic_MidiSource, const char*, int) { re
 // Music player: TSF (MIDI) + stb_vorbis (OGG)
 // ==========================================================================
 //
-// We output stereo float32 @ 44100 Hz. Engine-facing SoundStreamInfo reports
+// We output stereo float32 @ 44100 Hz for every song (OGG files at other
+// rates are resampled, mono is duplicated to both channels). Engine-facing
+// SoundStreamInfo reports
 // mNumChannels = +2 (positive = floats), which is what the music glue in
 // src/common/audio/music/music.cpp prefers (it volume-scales floats directly,
 // no int->float conversion hop).
@@ -124,12 +126,26 @@ struct MusicImpl {
     stb_vorbis* ogg;
     uint8_t*    ogg_data;       // we own; stb_vorbis holds a pointer into it
     int         ogg_channels;
+    int         ogg_rate;       // the file's own sample rate
+
+    // OGG resampler (only used when ogg_rate != kSampleRate). rs_buf holds
+    // decoded stereo frames at ogg_rate; rs_pos is the fractional source
+    // position of the next output frame. One frame before rs_pos is kept as
+    // interpolation history so the output is continuous across FillStream
+    // calls and buffer refills.
+    static constexpr int kRsCap = 4096 + 8;    // frames
+    float*      rs_buf;
+    int         rs_frames;      // valid frames in rs_buf
+    int         rs_end;         // first padding frame after EOF, or -1
+    double      rs_pos;
+    double      rs_step;        // source frames per output frame
 
     MusicImpl()
         : kind(MK_None), looping(false), paused(false), ended(false),
           synth(nullptr), events_head(nullptr), cursor(nullptr),
           cur_ms(0.0), total_ms(0),
-          ogg(nullptr), ogg_data(nullptr), ogg_channels(0) {}
+          ogg(nullptr), ogg_data(nullptr), ogg_channels(0), ogg_rate(0),
+          rs_buf(nullptr), rs_frames(0), rs_end(-1), rs_pos(0.0), rs_step(1.0) {}
 };
 
 // --- Global SoundFont cache ---------------------------------------------
@@ -500,6 +516,8 @@ static bool open_midi_from_memory(MusicImpl* m, const uint8_t* data, size_t len)
     return true;
 }
 
+static void reset_ogg_resampler(MusicImpl* m);
+
 static bool open_ogg_from_memory(MusicImpl* m, const uint8_t* data, size_t len) {
     // stb_vorbis aliases its input, so we must own the buffer for the stream
     // lifetime.
@@ -518,10 +536,23 @@ static bool open_ogg_from_memory(MusicImpl* m, const uint8_t* data, size_t len) 
         return false;
     }
 
+    if (info.sample_rate == 0) {
+        stb_vorbis_close(v); std::free(buf);
+        g_last_error = "invalid OGG sample rate";
+        return false;
+    }
+    if ((int)info.sample_rate != kSampleRate) {
+        m->rs_buf = (float*)std::malloc(sizeof(float) * kChannels * MusicImpl::kRsCap);
+        if (!m->rs_buf) { stb_vorbis_close(v); std::free(buf); return false; }
+        m->rs_step = (double)info.sample_rate / (double)kSampleRate;
+    }
+
     m->kind         = MK_Ogg;
     m->ogg          = v;
     m->ogg_data     = buf;
     m->ogg_channels = info.channels;
+    m->ogg_rate     = (int)info.sample_rate;
+    reset_ogg_resampler(m);
     return true;
 }
 
@@ -624,31 +655,111 @@ static void render_midi(MusicImpl* m, float* out, int frames) {
     }
 }
 
-static int render_ogg(MusicImpl* m, float* out, int frames) {
-    // stb_vorbis_get_samples_float_interleaved returns frames decoded.
-    int got = stb_vorbis_get_samples_float_interleaved(
-        m->ogg, 2, out, frames * 2);
-
-    // Mono expansion: stb upmixes automatically when channels=1 vs. 2 via
-    // the `channels` argument; if source is mono it duplicates to both.
-    // Actually check: passing channels=2 for a mono OGG … let's be safe:
-    if (m->ogg_channels == 1 && got > 0) {
-        // stb_vorbis_get_samples_float_interleaved is documented to
-        // up/down-mix to `channels`; nothing more to do.
-    }
-
-    if (got <= 0) {
-        if (m->looping) {
-            stb_vorbis_seek_start(m->ogg);
-            got = stb_vorbis_get_samples_float_interleaved(
-                m->ogg, 2, out, frames * 2);
-            if (got <= 0) { m->ended = true; return 0; }
+// Decode up to `frames` stereo frames at the file's own rate into out[].
+// Mono files are panned to the centre (stb_vorbis zero-fills extra channels
+// rather than upmixing, so asking it for 2 channels would leave the right ear
+// silent). The -3 dB equal-power centre matches how OpenAL Soft plays a mono
+// music stream natively, and how Web Audio pans centred mono SFX. Looping
+// streams wrap to the start without a gap.
+// Returns the number of frames decoded; less than `frames` only at the end
+// of a non-looping stream.
+static int decode_ogg(MusicImpl* m, float* out, int frames) {
+    int got = 0;
+    bool rewound = false;
+    while (got < frames) {
+        float* dst = out + got * kChannels;
+        int want = frames - got;
+        int n;
+        if (m->ogg_channels == 1) {
+            // Decode into the front of the free region, then spread back to
+            // front so each mono sample lands in both L and R. Walking down
+            // never overwrites a sample that hasn't been read yet.
+            n = stb_vorbis_get_samples_float_interleaved(m->ogg, 1, dst, want);
+            for (int i = n - 1; i >= 0; i--)
+                dst[i * 2] = dst[i * 2 + 1] = dst[i] * 0.70710678f;
         } else {
-            m->ended = true;
-            return 0;
+            n = stb_vorbis_get_samples_float_interleaved(m->ogg, 2, dst, want * 2);
         }
+        if (n > 0) {
+            got += n;
+            rewound = false;
+            continue;
+        }
+        if (!m->looping || rewound) break;  // end, or a file with no audio
+        stb_vorbis_seek_start(m->ogg);
+        rewound = true;
     }
     return got;
+}
+
+static void reset_ogg_resampler(MusicImpl* m) {
+    if (!m->rs_buf) return;
+    // One silent history frame so the first output frame (t = 0 at index 1)
+    // reproduces the first decoded sample exactly.
+    m->rs_buf[0] = m->rs_buf[1] = 0.f;
+    m->rs_frames = 1;
+    m->rs_end    = -1;
+    m->rs_pos    = 1.0;
+}
+
+// Catmull-Rom cubic between x1 and x2 at fraction t.
+static inline float cubic_interp(float x0, float x1, float x2, float x3, float t) {
+    return x1 + 0.5f * t * (x2 - x0 + t * (2.f * x0 - 5.f * x1 + 4.f * x2 - x3 +
+                                           t * (3.f * (x1 - x2) + x3 - x0)));
+}
+
+// Fill out[] with `frames` stereo frames at kSampleRate. The engine's AL
+// stream and the Web Audio context both run at kSampleRate; a file at any
+// other rate (BD's club music is 48 kHz) is resampled here, continuously
+// across buffers, instead of being played at the wrong speed and pitch.
+static int render_ogg(MusicImpl* m, float* out, int frames) {
+    if (!m->rs_buf) {
+        int got = decode_ogg(m, out, frames);
+        if (got <= 0) m->ended = true;
+        return got;
+    }
+
+    int produced = 0;
+    while (produced < frames) {
+        const int i = (int)m->rs_pos;
+        if (m->rs_end >= 0 && i >= m->rs_end) break;   // drained after EOF
+        if (i + 2 >= m->rs_frames) {
+            // Need frames i-1 .. i+2. Drop everything older than i-1, then
+            // top the buffer up from the decoder. (keep_from only exceeds
+            // rs_frames for files above twice kSampleRate, whose step can
+            // jump past the buffered frames; those frames are skipped.)
+            const int keep_from = (i - 1 < m->rs_frames) ? i - 1 : m->rs_frames;
+            const int kept = m->rs_frames - keep_from;
+            memmove(m->rs_buf, m->rs_buf + keep_from * kChannels,
+                    sizeof(float) * kChannels * kept);
+            m->rs_frames = kept;
+            m->rs_pos   -= keep_from;
+            if (m->rs_end >= 0) {
+                m->rs_end -= keep_from;
+                continue;
+            }
+            const int space = MusicImpl::kRsCap - m->rs_frames;
+            const int n = decode_ogg(m, m->rs_buf + m->rs_frames * kChannels, space - 3);
+            m->rs_frames += n;
+            if (n < space - 3) {
+                // End of a non-looping stream: pad with silence so the last
+                // real frames can still be interpolated, then stop there.
+                m->rs_end = m->rs_frames;
+                memset(m->rs_buf + m->rs_frames * kChannels, 0, sizeof(float) * kChannels * 3);
+                m->rs_frames += 3;
+            }
+            continue;
+        }
+        const float t = (float)(m->rs_pos - i);
+        const float* p = m->rs_buf + (i - 1) * kChannels;
+        for (int c = 0; c < kChannels; c++)
+            out[produced * kChannels + c] =
+                cubic_interp(p[c], p[kChannels + c], p[2 * kChannels + c], p[3 * kChannels + c], t);
+        produced++;
+        m->rs_pos += m->rs_step;
+    }
+    if (produced <= 0) m->ended = true;
+    return produced;
 }
 
 } // namespace
@@ -808,6 +919,7 @@ extern "C" zmusic_bool ZMusic_Start(ZMusic_MusicStream h, int /*subsong*/, zmusi
         if (m->synth) reset_synth(m->synth);
     } else if (m->kind == MK_Ogg) {
         stb_vorbis_seek_start(m->ogg);
+        reset_ogg_resampler(m);
     }
     return 1;
 }
@@ -838,6 +950,7 @@ extern "C" void ZMusic_Close(ZMusic_MusicStream h) {
     if (m->events_head) tml_free(m->events_head);
     if (m->ogg)         stb_vorbis_close(m->ogg);
     if (m->ogg_data)    std::free(m->ogg_data);
+    if (m->rs_buf)      std::free(m->rs_buf);
     delete m;
 }
 extern "C" zmusic_bool ZMusic_SetSubsong(ZMusic_MusicStream, int) { return 0; }
