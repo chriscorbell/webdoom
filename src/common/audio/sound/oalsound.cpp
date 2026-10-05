@@ -846,6 +846,19 @@ OpenALSoundRenderer::OpenALSoundRenderer()
 	alSpeedOfSound(343.3f);
 	if(ALC.EXT_EFX)
 		alListenerf(AL_METERS_PER_UNIT, 1.0f);
+#ifdef __EMSCRIPTEN__
+	// The engine wants no Doppler at all and turns it off per source with
+	// AL_DOPPLER_FACTOR 0. Emscripten's OpenAL has no per-source Doppler
+	// factor (the call fails with AL_INVALID_ENUM, which getALError hides),
+	// so its global factor of 1 applied to every sound. Velocities here are
+	// in map units per second against a speed of sound of 343.3, so a
+	// rocket (700 u/s) launched away from the player played at a third of
+	// its pitch, and anything flying at the player at 343+ u/s (an imp
+	// fireball is 350) divided by zero in the Doppler formula and produced
+	// an Infinity/NaN playbackRate. Disabling it globally gives a shift of
+	// exactly 1 for every source.
+	alDopplerFactor(0.f);
+#endif
 
 	alDistanceModel(AL_INVERSE_DISTANCE);
 	if(AL.EXT_source_distance_model)

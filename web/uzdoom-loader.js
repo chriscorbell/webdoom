@@ -17,18 +17,19 @@
 
   // ---- WebAudio NaN guard (must run before Emscripten OpenAL inits) ------
   //
-  // Emscripten's OpenAL → WebAudio port occasionally passes non-finite
-  // values (NaN / ±Infinity) to AudioParam setters. The proximate cause
-  // is its updateSourceRate() doppler calculation dividing by zero when a
-  // sound emits at the listener's exact position (pickup sounds, for
-  // example) — velocity vector length is zero, computed pitch ratio
-  // becomes NaN, and that NaN hits playbackRate.value. WebAudio throws
+  // Emscripten's OpenAL → WebAudio port can pass non-finite values
+  // (NaN / ±Infinity) to AudioParam setters. The known source was its
+  // Doppler formula (updateSourceSpace): it clamps a source's approach
+  // speed to the speed of sound, so anything flying at the listener at or
+  // above it divides by zero and the resulting playbackRate is ±Infinity or
+  // NaN. With the engine's map-unit velocities against a speed of sound of
+  // 343.3, an imp fireball (350 u/s) was enough. oalsound.cpp now sets the
+  // global Doppler factor to 0, which removes that path. WebAudio throws
   // synchronously on non-finite input, the exception escapes the rAF
   // callback, and the main loop dies.
   //
-  // Upstream bug (known, unfixed at the JS port layer). Defense in depth:
-  // wrap the AudioParam setters to clamp non-finite to zero. Silent
-  // audio glitch beats a hard crash mid-game.
+  // Defense in depth: wrap the AudioParam setters to clamp non-finite to
+  // zero. Silent audio glitch beats a hard crash mid-game.
   (function guardAudioParam() {
     if (typeof AudioParam === 'undefined') return;
     const proto = AudioParam.prototype;
