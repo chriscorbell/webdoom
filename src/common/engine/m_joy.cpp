@@ -59,7 +59,14 @@ EXTERN_CVAR(Bool, joy_xinput)
 
 // PUBLIC DATA DEFINITIONS -------------------------------------------------
 
-CUSTOM_CVARD(Bool, use_joystick, false, CVAR_ARCHIVE|CVAR_GLOBALCONFIG|CVAR_NOINITCALL, "enables input from the joystick if it is present") 
+#ifdef __EMSCRIPTEN__
+// A browser only exposes a gamepad after the player presses one of its
+// buttons, so having it on costs nothing until then.
+#define USE_JOYSTICK_DEFAULT true
+#else
+#define USE_JOYSTICK_DEFAULT false
+#endif
+CUSTOM_CVARD(Bool, use_joystick, USE_JOYSTICK_DEFAULT, CVAR_ARCHIVE|CVAR_GLOBALCONFIG|CVAR_NOINITCALL, "enables input from the joystick if it is present") 
 {
 #ifdef _WIN32
 	joy_ps2raw->Callback();

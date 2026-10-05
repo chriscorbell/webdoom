@@ -10,7 +10,7 @@ set(DYN_OPENAL        OFF CACHE BOOL "" FORCE)
 set(NO_GTK            ON  CACHE BOOL "" FORCE)
 set(DYN_GTK           OFF CACHE BOOL "" FORCE)
 set(FORCE_INTERNAL_BZIP2 ON CACHE BOOL "" FORCE)
-set(NO_SDL_JOYSTICK   ON  CACHE BOOL "" FORCE)
+set(NO_SDL_JOYSTICK   OFF CACHE BOOL "" FORCE)
 
 # Stub out features that can't compile to WASM.
 set(UZDOOM_WASM_STUB_LIBVPX  ON CACHE BOOL "Skip libvpx (no movie playback)")
@@ -148,7 +148,6 @@ add_definitions(
   -D__EMSCRIPTEN__
   -DUZDOOM_WASM
   -DNO_GTK
-  -DNO_SDL_JOYSTICK=1   # joysticks would need gamepad API work; add later
 )
 
 

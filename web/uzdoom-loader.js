@@ -911,6 +911,17 @@
   // Module.requestFullscreen would also work, but it can fight with SDL's
   // resize handler, so we use the standard DOM API on the canvas directly.
 
+  // In fullscreen, lock the keyboard so keys the browser would otherwise
+  // take (Esc, Ctrl+W, Ctrl+T, Alt+Tab-style shortcuts) reach the game.
+  // Esc then opens the game menu; holding it leaves fullscreen. Chromium
+  // only; elsewhere this is a no-op.
+  document.addEventListener('fullscreenchange', () => {
+    const kb = navigator.keyboard;
+    if (!kb || !kb.lock) return;
+    if (document.fullscreenElement) kb.lock().catch(() => {});
+    else kb.unlock();
+  });
+
   function toggleFullscreen() {
     const c = $('canvas');
     if (document.fullscreenElement) {
@@ -996,6 +1007,25 @@
     if (document.pointerLockElement === $('canvas')) return;
     if ($('canvas').requestPointerLock) $('canvas').requestPointerLock();
   });
+
+  // Ask for raw mouse movement on every pointer lock, including the ones
+  // SDL requests, so OS pointer acceleration doesn't skew aiming the way
+  // native raw input avoids. Browsers that can't provide it reject the
+  // option, and we lock without it.
+  (function rawPointerLock() {
+    const orig = Element.prototype.requestPointerLock;
+    if (!orig) return;
+    Element.prototype.requestPointerLock = function (options) {
+      const result = orig.call(this, Object.assign({ unadjustedMovement: true }, options));
+      if (result && typeof result.catch === 'function') {
+        return result.catch((e) => {
+          if (e && e.name === 'NotSupportedError') return orig.call(this, options);
+          throw e;
+        });
+      }
+      return result;
+    };
+  })();
 
   // ---- Main-thread stall monitor ----------------------------------------
   //
