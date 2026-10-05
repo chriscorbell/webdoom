@@ -22,7 +22,7 @@ set(UZDOOM_WASM_STUB_DISCORD ON CACHE BOOL "Skip Discord RPC integration")
 # <thread> headers and <atomic> in the compiler. We set it centrally.
 # -fexceptions keeps unwinders + typeinfo alive so UZDoom's CFatalError
 # throws actually surface as a readable error instead of abort(undefined).
-set(_EMSC_COMMON "-pthread -sUSE_SDL=2 -sUSE_PTHREADS=1 -fexceptions")
+set(_EMSC_COMMON "-pthread -sUSE_SDL=2 -sUSE_PTHREADS=1 -fwasm-exceptions")
 
 # --- Build-type-aware optimization/debug flags ---------------------------
 # Release (default): -O3 + LTO, strip runtime checks and DWARF. Expect link
@@ -114,29 +114,6 @@ if(WIN32 OR CMAKE_HOST_WIN32)
   endif()
 endif()
 list(APPEND _EMSC_LINK "--shell-file" "${_SHELL_FILE}")
-
-# Preload Freedoom if the user dropped it into web/assets/
-function(_uzdoom_add_preload src dst)
-  set(_p "${src}")
-  if(WIN32 OR CMAKE_HOST_WIN32)
-    execute_process(
-      COMMAND powershell -NoProfile -Command
-        "(New-Object -ComObject Scripting.FileSystemObject).GetFile('${src}').ShortPath"
-      OUTPUT_VARIABLE _short OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(_short)
-      set(_p "${_short}")
-    endif()
-  endif()
-  list(APPEND _EMSC_LINK "--preload-file" "${_p}@${dst}")
-  set(_EMSC_LINK "${_EMSC_LINK}" PARENT_SCOPE)
-endfunction()
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/web/assets/freedoom1.wad")
-  _uzdoom_add_preload("${CMAKE_SOURCE_DIR}/web/assets/freedoom1.wad" "/freedoom1.wad")
-endif()
-if(EXISTS "${CMAKE_SOURCE_DIR}/web/assets/freedoom2.wad")
-  _uzdoom_add_preload("${CMAKE_SOURCE_DIR}/web/assets/freedoom2.wad" "/freedoom2.wad")
-endif()
 
 string(REPLACE ";" " " _EMSC_LINK_STR "${_EMSC_LINK}")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_EMSC_LINK_STR}")

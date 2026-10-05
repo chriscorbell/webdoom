@@ -26,12 +26,12 @@ RUN sed -i 's/\r$//' build-wasm.sh \
  && chmod +x build-wasm.sh
 
 # --- Freedoom IWADs --------------------------------------------------------
-# The CMake config scans web/assets/ at configure time and only adds
-# `--preload-file freedoom{1,2}.wad` to the link line when the files
-# exist. No preload-file → no uzdoom.data produced → stage-2 COPY fails.
-# Local dev already has these in web/assets/ (gitignored, 40 MB); CI
-# runners get a clean checkout without them, so fetch if missing.
-# Pinned to a specific release for reproducibility.
+# The build copies web/assets/freedoom{1,2}.wad next to the page as
+# freedoom/*.wad, which the picker's "Use bundled Freedoom" (and
+# ?iwad=freedoom1.wad) downloads on demand. Local dev may already have them
+# in web/assets/ (gitignored); CI runners get a clean checkout without
+# them, so fetch if missing. Pinned to a specific release for
+# reproducibility.
 ARG FREEDOOM_VERSION=0.13.0
 RUN if [ ! -f /src/web/assets/freedoom1.wad ] || [ ! -f /src/web/assets/freedoom2.wad ]; then \
         echo "Fetching Freedoom ${FREEDOOM_VERSION}..." \
@@ -59,7 +59,11 @@ RUN if [ ! -f /src/web/assets/freedoom1.wad ] || [ ! -f /src/web/assets/freedoom
 # The emscripten/emsdk base image sets EMSDK=/emsdk, puts emcc on PATH,
 # and pre-populates EMSDK_NODE / EMSDK_PYTHON. Our build-wasm.sh picks
 # those up via its OS-detection path.
-RUN BUILD_TYPE=Release EMSDK=/emsdk ./build-wasm.sh
+# GIT_DESCRIBE names the build in the engine's version string; .git isn't in
+# the build context, so CI passes it in (see docker-publish.yml).
+ARG GIT_DESCRIBE
+RUN if [ -z "${GIT_DESCRIBE}" ]; then unset GIT_DESCRIBE; fi \
+ && BUILD_TYPE=Release EMSDK=/emsdk ./build-wasm.sh
 
 # --- Stage runtime artifacts -----------------------------------------------
 # Collect everything the runtime actually serves into /stage so the next
@@ -70,12 +74,13 @@ RUN BUILD_TYPE=Release EMSDK=/emsdk ./build-wasm.sh
 # carries iwadinfo.txt, which is what teaches the engine which files
 # count as valid IWADs. Miss that and user-uploaded WADs get rejected
 # with "Cannot find a game IWAD". brightmaps/lights/widescreen_gfx are
-# rendering data. soundfonts/ + fm_banks/ are MIDI backends.
-RUN mkdir -p /stage/soundfonts /stage/fm_banks \
+# rendering data. soundfonts/ is the MIDI synth's bank (the web build's
+# music stub has no OPL/OPN synth, so fm_banks/ isn't shipped).
+RUN mkdir -p /stage/soundfonts /stage/freedoom \
  && cp /src/build-wasm/uzdoom.html              /stage/index.html \
  && cp /src/build-wasm/uzdoom.js                /stage/uzdoom.js \
  && cp /src/build-wasm/uzdoom.wasm              /stage/uzdoom.wasm \
- && cp /src/build-wasm/uzdoom.data              /stage/uzdoom.data \
+ && cp /src/build-wasm/freedoom/*.wad           /stage/freedoom/ \
  && cp /src/build-wasm/uzdoom-loader.js         /stage/uzdoom-loader.js \
  && cp /src/build-wasm/uzdoom-melt.js           /stage/uzdoom-melt.js \
  && cp /src/build-wasm/uzdoom.pk3               /stage/ \
@@ -84,8 +89,6 @@ RUN mkdir -p /stage/soundfonts /stage/fm_banks \
  && cp /src/build-wasm/lights.pk3               /stage/ \
  && cp /src/build-wasm/game_widescreen_gfx.pk3  /stage/ \
  && cp /src/build-wasm/soundfonts/uzdoom.sf2    /stage/soundfonts/ \
- && cp /src/build-wasm/fm_banks/*.wopl          /stage/fm_banks/ 2>/dev/null || true \
- && cp /src/build-wasm/fm_banks/*.wopn          /stage/fm_banks/ 2>/dev/null || true \
  && echo "=== /stage contents ===" \
  && ls -laR /stage
 
