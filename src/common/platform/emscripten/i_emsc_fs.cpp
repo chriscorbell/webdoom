@@ -10,6 +10,8 @@
 //                              if the JS side already did the work.
 //   • uzdoom_sync_saves()   — EMSCRIPTEN_KEEPALIVE entry JS can call after
 //                              a save to flush IDBFS to IndexedDB immediately.
+//   • uzdoom_game_saved()   — G_DoSaveGame's hook: tells the loader and
+//                              flushes the new savegame.
 
 #ifdef __EMSCRIPTEN__
 
@@ -33,12 +35,26 @@ extern "C" void I_InitEmscriptenFS()
 extern "C" EMSCRIPTEN_KEEPALIVE void uzdoom_sync_saves()
 {
 	EM_ASM({
-		if (typeof FS !== 'undefined') {
+		// Prefer the loader's serialized flush: two IDBFS syncs in flight
+		// at once fail with InvalidStateError.
+		if (typeof Module.syncSavesToIDB === 'function') {
+			Module.syncSavesToIDB();
+		} else if (typeof FS !== 'undefined') {
 			FS.syncfs(false, function (err) {
 				if (err) console.warn('uzdoom_sync_saves:', err);
 			});
 		}
 	});
+}
+
+// Called after a savegame is written, so it reaches IndexedDB now rather
+// than on the loader's next periodic flush.
+extern "C" void uzdoom_game_saved()
+{
+	EM_ASM({
+		if (typeof Module.onGameSaved === 'function') Module.onGameSaved();
+	});
+	uzdoom_sync_saves();
 }
 
 #endif // __EMSCRIPTEN__

@@ -229,6 +229,7 @@
     soundfont: null,  // { name, data }
     ready: false,
     launched: false,
+    engineRunning: false, // callMain has returned into the main loop
     exited: false,
   };
 
@@ -415,6 +416,33 @@
     }
     return _doSyncWrite();
   }
+
+  // The engine routes its own flushes (uzdoom_sync_saves) through here too.
+  Module.syncSavesToIDB = syncSavesToIDB;
+
+  // Native UZDoom writes its config INI on exit, which closing a tab never
+  // reaches. Write it before each flush so menu settings, key bindings and
+  // mod options survive a reload.
+  function flushToIDB() {
+    if (state.engineRunning && !state.exited && typeof Module._uzdoom_save_config === 'function') {
+      try { Module._uzdoom_save_config(); } catch (e) { console.warn('[uzdoom-loader] config save failed:', e); }
+    }
+    return syncSavesToIDB();
+  }
+
+  // Ask once, after the first savegame, for storage the browser won't evict
+  // under disk pressure (or after 7 days idle, in Safari). Chrome decides
+  // silently; Firefox shows a prompt, which is why this waits for a save
+  // rather than firing on page load.
+  let persistRequested = false;
+  Module.onGameSaved = function () {
+    if (persistRequested || !navigator.storage || !navigator.storage.persist) return;
+    persistRequested = true;
+    navigator.storage.persisted()
+      .then((already) => already || navigator.storage.persist())
+      .then((granted) => console.log('[uzdoom-loader] persistent storage ' + (granted ? 'granted' : 'not granted')))
+      .catch(() => {});
+  };
 
   function _doSyncWrite() {
     _syncInFlight = new Promise((resolve) => {
@@ -833,6 +861,7 @@
 
       try {
         Module.callMain(userArgs);
+        state.engineRunning = true;
       } catch (e) {
         // ExitStatus is normal exit — handled via Module.onExit.
         if (e && e.name === 'ExitStatus') return;
@@ -881,28 +910,33 @@
 
   // ---- Periodic save sync + visibility / unload hooks --------------------
   //
-  // Four moments can flush MEMFS -> IndexedDB:
+  // Five moments can flush MEMFS -> IndexedDB:
   //   1. Every 30 s while the game is running (baseline checkpoint).
-  //   2. When the tab becomes hidden (user alt-tabs or switches tab).
-  //   3. On beforeunload / pagehide (best-effort; browsers don't wait).
-  //   4. On engine exit via uzdoom_sync_saves from D_DoomLoop_EmscTick.
-  // Each one is fire-and-forget; IndexedDB writes are idempotent.
+  //   2. When the tab becomes hidden (user alt-tabs, switches or closes
+  //      the tab — browsers fire this before unloading).
+  //   3. On pagehide / beforeunload (best-effort; browsers don't wait).
+  //   4. Right after a savegame is written (uzdoom_game_saved).
+  //   5. On engine exit via uzdoom_sync_saves from D_DoomLoop_EmscTick.
+  // The first three write the config INI first. Each one is fire-and-
+  // forget; IndexedDB writes are idempotent.
 
   setInterval(() => {
     if (!state.launched || state.exited) return;
-    syncSavesToIDB();
+    flushToIDB();
   }, 30000);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'hidden') return;
     if (!state.launched || state.exited) return;
-    syncSavesToIDB();
+    flushToIDB();
   });
 
-  window.addEventListener('beforeunload', () => {
-    if (!state.launched || state.exited) return;
-    syncSavesToIDB();
-  });
+  for (const evt of ['pagehide', 'beforeunload']) {
+    window.addEventListener(evt, () => {
+      if (!state.launched || state.exited) return;
+      flushToIDB();
+    });
+  }
 
   // ---- Fullscreen toggle -------------------------------------------------
   //

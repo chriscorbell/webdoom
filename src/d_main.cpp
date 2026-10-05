@@ -1278,6 +1278,14 @@ extern "C" void uzdoom_sync_saves();
 
 static int s_emsc_lasttic = 0;
 
+// Native writes the config INI on exit, which a closed browser tab never
+// reaches, so settings changed in the menus were lost on reload. The
+// loader calls this before each flush to IndexedDB instead.
+extern "C" EMSCRIPTEN_KEEPALIVE void uzdoom_save_config()
+{
+	M_SaveDefaults(nullptr);
+}
+
 // Signal the JS shell that the engine is shutting down and why. Hides the
 // canvas, shows the "Game exited" panel, and kicks a final IDBFS -> IDB
 // flush. Safe to call even if the JS side hasn't wired onEngineExit — the
