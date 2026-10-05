@@ -2,7 +2,7 @@
 
 Fork of [abootnet/uzdoom-wasm](https://github.com/abootnet/uzdoom-wasm) (WebAssembly port of [UZDoom](https://github.com/UZDoom/UZDoom)) with tweaks to optimize for Brutal Doom v22b6, plus a persistent boot config for auto-launch behavior.
 
-Running at [doom.xode.cc](https://doom.xode.cc).
+Running at [doom.chriscorbell.com](https://doom.chriscorbell.com).
 
 The upstream fork is the general-purpose project: picker UI, iframe embedding, many IWADs. This one is narrower — a container you point at a directory of WADs so it boots one game. See the [upstream README](https://github.com/abootnet/uzdoom-wasm#readme) for the features not covered here.
 
