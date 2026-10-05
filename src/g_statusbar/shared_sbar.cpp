@@ -832,39 +832,24 @@ void DBaseStatusBar::AttachMessage (DHUDMessageBase *msg, uint32_t id, int layer
 			return newIsPic ? f->IsSinglePicFont() : f == newFont;
 		};
 
-		// Count existing anonymous-id messages in this layer's group.
-		// If count + 1 (this new one) > cap, remove the oldest ones until
-		// we'd be at exactly (cap - 1) so that after attaching the new
-		// one we land at cap.
-		int count = 0;
+		// Collect this layer's anonymous-id messages in the same group.
+		// The layer list is sorted by descending ID, and a new message goes
+		// in front of existing ones with the same ID, so within an ID the
+		// list runs newest to oldest: the oldest are at the end.
+		TArray<DHUDMessageBase *> group;
 		for (DHUDMessageBase *p = Messages[layer]; p; p = p->Next)
 		{
 			if ((p->SBarID == 0 || p->SBarID == 0xFFFFFFFF) && sameGroup(p))
 			{
-				count++;
+				group.Push(p);
 			}
 		}
-		// Determine how many to remove (oldest first — they're at the
-		// HEAD of the list, since AttachMessage appends to the end via
-		// the sorted-insertion below).
-		int toRemove = (count + 1) - effectiveCap;
-		if (toRemove > 0)
+		// Remove the oldest until this new one brings the group to the cap.
+		int toRemove = int(group.Size()) + 1 - effectiveCap;
+		for (int i = int(group.Size()) - 1; toRemove > 0 && i >= 0; i--, toRemove--)
 		{
-			TObjPtr<DHUDMessageBase *> *cur = &Messages[layer];
-			while (toRemove > 0 && (*cur).Get() != nullptr)
-			{
-				DHUDMessageBase *candidate = (*cur).Get();
-				if ((candidate->SBarID == 0 || candidate->SBarID == 0xFFFFFFFF) && sameGroup(candidate))
-				{
-					*cur = candidate->Next;
-					candidate->Destroy();
-					toRemove--;
-				}
-				else
-				{
-					cur = &candidate->Next;
-				}
-			}
+			DetachMessage(group[i]);
+			group[i]->Destroy();
 		}
 	}
 

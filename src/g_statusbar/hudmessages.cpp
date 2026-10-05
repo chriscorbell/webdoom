@@ -531,8 +531,13 @@ void DHUDMessage::DoDraw (int linenum, int x, int y, bool clean, int hudheight)
 	// Pic-fonts must take the STYLE_Translucent path so their texture-
 	// alpha gradient survives and they composite correctly when stacked.
 	//
+	// Only the default Translucent style is swapped: additive and other
+	// styles (HUDMSG_ADDBLEND etc.) must keep theirs, or they'd draw as
+	// plain opaque text.
+	//
 	// Harmless on native GL/Vulkan backends.
-	bool skipStyle = (Alpha >= 1.f && !(Font && Font->IsSinglePicFont()));
+	bool skipStyle = (Alpha >= 1.f && Style == LegacyRenderStyles[STYLE_Translucent]
+		&& !(Font && Font->IsSinglePicFont()));
 	if (hudheight == 0)
 	{
 		int scale = active_con_scaletext(twod);
