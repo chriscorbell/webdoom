@@ -2,7 +2,7 @@
 
 Fork of [abootnet/uzdoom-wasm](https://github.com/abootnet/uzdoom-wasm) (WebAssembly port of [UZDoom](https://github.com/UZDoom/UZDoom)) with tweaks to optimize for Brutal Doom v22b6, plus a persistent boot config for auto-launch behavior.
 
-Running at [doom.xode.cc](https://doom.xode.cc).
+Running at [doom.chriscorbell.com](https://doom.chriscorbell.com).
 
 The upstream fork is the general-purpose project: picker UI, iframe embedding, many IWADs. This one is narrower — a container you point at a directory of WADs so it boots one game. See the [upstream README](https://github.com/abootnet/uzdoom-wasm#readme) for the features not covered here.
 
@@ -56,9 +56,13 @@ URL strings are never pasted into the engine's argv. Every value is checked agai
 
 ### Side-loaded files
 
-Any file named by `iwad` or `file` that is not already in IndexedDB gets fetched from `/private/<name>`, then saved so later visits skip the download. There is no registration step: a name the server does not have returns 404 and falls back to the normal missing-file handling. Anything you drop in the mounted directory is loadable by name.
+Any file named by `iwad` or `file` that is not already in IndexedDB gets fetched from `/private/<name>`, then saved so later visits skip the download. Each later visit sends a `HEAD` request and downloads the file again only if the server's copy changed, so replacing a mod under the same name reaches returning players. There is no registration step: a name the server does not have returns 404 and falls back to the normal missing-file handling. Anything you drop in the mounted directory is loadable by name.
 
-The Caddyfile serves `/srv/private/` with `X-Robots-Tag: noindex, nofollow` and a long cache lifetime.
+The Caddyfile serves `/srv/private/` with `X-Robots-Tag: noindex, nofollow`, and makes browsers revalidate it rather than cache it.
+
+### Caching
+
+The Docker build stamps a hash of the engine files onto every asset URL (`uzdoom.wasm?v=…`). Versioned URLs are cached for a year; `index.html` and anything unversioned is revalidated on each visit. A deploy therefore reaches players on their next visit, and a browser can never pair a new `uzdoom.js` with an old `uzdoom.wasm`.
 
 ## Building from source
 

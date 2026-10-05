@@ -89,6 +89,18 @@ RUN mkdir -p /stage/soundfonts /stage/fm_banks \
  && echo "=== /stage contents ===" \
  && ls -laR /stage
 
+# Stamp a hash of the engine files onto every asset URL (shell.html and the
+# loader carry a __UZDOOM_BUILD_ID__ placeholder; emcc writes the uzdoom.js
+# tag itself). Caddy caches versioned URLs for a year and revalidates the
+# rest, so after a deploy a browser can't mix new and old engine files.
+RUN cd /stage \
+ && BUILD_ID="$(find . -type f ! -name index.html -print0 | sort -z | xargs -0 cat | sha256sum | cut -c1-12)" \
+ && sed -i -e "s/__UZDOOM_BUILD_ID__/${BUILD_ID}/g" \
+           -e "s#src=uzdoom.js #src=uzdoom.js?v=${BUILD_ID} #" index.html \
+ && grep -q "src=uzdoom.js?v=${BUILD_ID}" index.html \
+ && ! grep -q "__UZDOOM_BUILD_ID__" index.html \
+ && echo "build id: ${BUILD_ID}"
+
 # --- Runtime stage ---------------------------------------------------------
 FROM caddy:2-alpine
 

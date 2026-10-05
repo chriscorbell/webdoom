@@ -611,10 +611,11 @@
 
   // Streaming fetch with Content-Length-based progress. Falls back to a
   // single-buffer read if the server didn't expose Content-Length (e.g.
-  // gzip encoding drops it).
-  async function fetchWithProgress(url, onProgress) {
-    const resp = await fetch(url);
+  // gzip encoding drops it). `onResponse` sees the response headers.
+  async function fetchWithProgress(url, onProgress, { init, onResponse } = {}) {
+    const resp = await fetch(url, init);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (onResponse) onResponse(resp);
     const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
     if (!resp.body || !resp.body.getReader || !total) {
       const buf = new Uint8Array(await resp.arrayBuffer());
@@ -648,7 +649,7 @@
       setStatus(`Fetching ${a.url}…`);
       setStatusRight(`${i + 1}/${CORE_ASSETS.length}`);
       try {
-        const buf = await fetchWithProgress(a.url, (recv, total) => {
+        const buf = await fetchWithProgress(Module.locateFile(a.url), (recv, total) => {
           const pct = total > 0 ? (recv / total * 100) : 0;
           markAsset(a.url, 'pending',
             total > 0 ? `${formatBytes(recv)} / ${formatBytes(total)} (${pct.toFixed(0)}%)`
@@ -672,40 +673,98 @@
     setStatusRight(`Loaded ${formatBytes(totalBytes)}`);
   }
 
-  // Fetch any launch-referenced files (IWAD and mods) that aren't in IDBFS
-  // yet from the server's /private/ mount. Per-file failures are non-fatal:
-  // a missing IWAD surfaces through writeUserFiles' clear error, a missing
-  // mod is skipped there with a warning. After a successful fetch we syncfs
-  // so subsequent loads pick the file up straight from IndexedDB.
+  // A side-loaded file stays in IDBFS after its first download. To notice
+  // when the server's copy changes (a new mod build under the same name),
+  // the loader records each file's HTTP validators and compares them with
+  // a HEAD request on later launches.
+  const SIDELOAD_META = IDB_WAD_MOUNT + '/.sideload.json';
+
+  function readSideloadMeta() {
+    try { return JSON.parse(FS.readFile(SIDELOAD_META, { encoding: 'utf8' })); }
+    catch (e) { return {}; }
+  }
+
+  function validatorsOf(resp) {
+    return {
+      etag: resp.headers.get('ETag'),
+      modified: resp.headers.get('Last-Modified'),
+      size: parseInt(resp.headers.get('Content-Length') || '', 10) || null,
+    };
+  }
+
+  function sameValidators(a, b) {
+    if (a.etag && b.etag) return a.etag === b.etag;
+    return a.modified === b.modified && a.size === b.size;
+  }
+
+  // Whether the cached copy at `path` still matches the server. Offline, or
+  // when the server doesn't have the file, the cached copy wins.
+  async function sideloadIsCurrent(name, path, meta) {
+    let resp;
+    try {
+      resp = await fetch(sideloadPath(name), { method: 'HEAD', cache: 'no-store' });
+    } catch (e) {
+      return true;
+    }
+    if (!resp.ok) return true;
+    const server = validatorsOf(resp);
+    if (meta[name]) return sameValidators(meta[name], server);
+    // Downloaded before validators were recorded: trust it if the size
+    // matches, and remember the server's validators from now on.
+    const current = server.size === null || server.size === FS.stat(path).size;
+    if (current) meta[name] = server;
+    return current;
+  }
+
+  // Fetch launch-referenced files (IWAD and mods) from the server's
+  // /private/ mount when they aren't in IDBFS yet or the server's copy has
+  // changed. Per-file failures are non-fatal: a missing IWAD surfaces
+  // through writeUserFiles' clear error, a missing mod is skipped there
+  // with a warning. Afterwards we syncfs so later loads read the files
+  // straight from IndexedDB.
   async function resolveSideloadedFiles() {
     const wanted = [];
     if (state.iwad && state.iwad.persisted) wanted.push(state.iwad.name);
     for (const m of state.mods) {
       if (m.persisted) wanted.push(m.name);
     }
+    if (wanted.length === 0) return;
 
-    let fetched = 0;
+    const meta = readSideloadMeta();
+    const metaBefore = JSON.stringify(meta);
     for (const name of wanted) {
       const p = IDB_WAD_MOUNT + '/' + name;
-      if (fsExists(p)) continue;
+      if (fsExists(p)) {
+        setStatus(`Checking ${name}…`);
+        if (await sideloadIsCurrent(name, p, meta)) continue;
+        console.log(`[uzdoom-loader] ${name} changed on the server, downloading it again`);
+      }
 
       setStatus(`Fetching ${name}…`);
       try {
+        let server = null;
         const buf = await fetchWithProgress(sideloadPath(name), (recv, total) => {
           setStatusRight(
             total > 0
               ? `${name}: ${formatBytes(recv)} / ${formatBytes(total)} (${(recv / total * 100).toFixed(0)}%)`
               : `${name}: ${formatBytes(recv)}`
           );
+        }, {
+          // The copy lives in IDBFS; keeping a second one in the HTTP
+          // cache would only waste disk, and an old immutable entry there
+          // would hide the server's update.
+          init: { cache: 'no-store' },
+          onResponse: (resp) => { server = validatorsOf(resp); },
         });
         FS.writeFile(p, buf);
-        fetched++;
+        meta[name] = server;
         console.log(`[uzdoom-loader] side-loaded ${name} (${formatBytes(buf.length)})`);
       } catch (e) {
         console.warn(`[uzdoom-loader] side-load failed for ${name}:`, e);
       }
     }
-    if (fetched > 0) {
+    if (JSON.stringify(meta) !== metaBefore) {
+      FS.writeFile(SIDELOAD_META, JSON.stringify(meta));
       // Persist to IndexedDB so the next launch finds them without a fetch.
       syncSavesToIDB();
     }
