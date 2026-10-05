@@ -306,9 +306,11 @@ static uint8_t* mus2mid(const uint8_t* mus, size_t mus_len, size_t* out_size) {
         std::free(out); return nullptr;
     }
 
-    // Per-channel last program number (for MUS "instrument change" ctrl,
-    // which maps to MIDI program change — needs running channel tracking).
-    // Already tracked implicitly via MUS; we just emit what we see.
+    // A MUS note-on only carries a volume byte when the volume changes; a
+    // note-on without one plays at the channel's previous note volume. Start
+    // every channel at 127, as ZMusic's MUSSong2 does.
+    uint8_t last_vol[16];
+    memset(last_vol, 127, sizeof(last_vol));
 
     // Delta-time in MIDI ticks to emit before the next event. Starts at 0;
     // filled in by the delay that follows each non-"last" MUS event.
@@ -317,9 +319,10 @@ static uint8_t* mus2mid(const uint8_t* mus, size_t mus_len, size_t* out_size) {
 
     while (ev < ev_end && !done) {
         uint8_t desc = *ev++;
-        uint8_t last = (desc >> 7) & 1;
-        uint8_t type = (desc >> 4) & 7;
-        uint8_t ch   = remap_channel(desc & 0x0F);
+        uint8_t last   = (desc >> 7) & 1;
+        uint8_t type   = (desc >> 4) & 7;
+        uint8_t mus_ch = desc & 0x0F;
+        uint8_t ch     = remap_channel(mus_ch);
 
         switch (type) {
         case 0: { // release note
@@ -335,15 +338,15 @@ static uint8_t* mus2mid(const uint8_t* mus, size_t mus_len, size_t* out_size) {
             if (ev >= ev_end) { done = true; break; }
             uint8_t nb = *ev++;
             uint8_t note = nb & 0x7F;
-            uint8_t vel  = 0x7F;
             if (nb & 0x80) {
                 if (ev >= ev_end) { done = true; break; }
-                vel = *ev++ & 0x7F;
+                uint8_t v = *ev++;
+                last_vol[mus_ch] = v > 127 ? 127 : v;
             }
             midi_push_varlen(out, cap, pos, delta); delta = 0;
             write_u8(out, cap, pos, (uint8_t)(0x90 | ch));
             write_u8(out, cap, pos, note);
-            write_u8(out, cap, pos, vel);
+            write_u8(out, cap, pos, last_vol[mus_ch]);
             break;
         }
         case 2: { // pitch bend (1 byte, 0..255, 128 = center)
@@ -381,7 +384,11 @@ static uint8_t* mus2mid(const uint8_t* mus, size_t mus_len, size_t* out_size) {
         case 4: { // controller
             if (ev + 1 >= ev_end) { done = true; break; }
             uint8_t cnum = *ev++;
-            uint8_t cval = *ev++ & 0x7F;
+            // DMX accepts 8-bit controller values; clamp (as ZMusic does)
+            // rather than mask, so e.g. volume 128 stays loud instead of
+            // wrapping to 0.
+            uint8_t cval = *ev++;
+            if (cval > 127) cval = 127;
             midi_push_varlen(out, cap, pos, delta); delta = 0;
             if (cnum == 0) {
                 // Program change. MUS uses full 8 bits; MIDI program = 0..127.
