@@ -229,6 +229,7 @@
     soundfont: null,  // { name, data }
     ready: false,
     launched: false,
+    engineRunning: false, // callMain has returned into the main loop
     exited: false,
   };
 
@@ -451,10 +452,14 @@
   // panel.
 
   let exitPanelShown = false;
+  let restarting = false;
+  let fatalErrorText = null;
   function showExitPanel(code, reason) {
-    if (exitPanelShown) return;
+    if (exitPanelShown || restarting) return;
     exitPanelShown = true;
     state.exited = true;
+    if (!reason && fatalErrorText) reason = fatalErrorText;
+    if (reason && /Could not (re)?alloc/.test(reason)) reason += ' — the browser ran out of memory for the game.';
 
     $('canvas').classList.add('hidden');
     $('fsBtn').classList.add('hidden');
@@ -484,9 +489,45 @@
     // atexit runtime teardown on older browsers. Goes through the
     // serializer so it coalesces with any periodic-interval sync already
     // mid-flight.
-    syncSavesToIDB();
+    const synced = syncSavesToIDB();
+    if (reason === 'restart') {
+      // debug_restart can't re-enter main() in the browser, so reload the
+      // page, which relaunches with the same settings. The runtime exits
+      // right after this, which can leave the flush unanswered: don't wait
+      // on it for long.
+      restarting = true;
+      state.exited = true;
+      setStatus('Restarting…');
+      const reload = () => location.reload();
+      synced.then(reload, reload);
+      setTimeout(reload, 1000);
+      return;
+    }
     showExitPanel(code, reason);
   };
+
+  // I_FatalError text (bad mod, missing IWAD lump, ...). The engine exits
+  // right after, and the exit panel shows this instead of a bare code.
+  Module.onFatalError = function (text) {
+    fatalErrorText = text.trim() || null;
+  };
+
+  // A wasm trap or abort() kills the main loop and leaves a frozen
+  // canvas; say so and save what can be saved.
+  function onCrash(reason) {
+    if (!state.engineRunning || state.exited) return;
+    console.error('[uzdoom-loader] engine crashed:', reason);
+    syncSavesToIDB();
+    showExitPanel(-1, 'The engine crashed (' + reason + '). Your saves are kept.');
+  }
+  Module.onAbort = function (what) { onCrash(String(what || 'abort')); };
+  window.addEventListener('error', (e) => {
+    const err = e.error;
+    if ((typeof WebAssembly !== 'undefined' && err instanceof WebAssembly.RuntimeError) ||
+        /^(RuntimeError|Aborted\()/.test(String(err && err.message ? err.message : e.message))) {
+      onCrash(String(err && err.message ? err.message : e.message));
+    }
+  });
 
   Module.onExit = function (code) {
     // Runtime has ended. If onEngineExit didn't fire (abort path), show
@@ -833,6 +874,7 @@
 
       try {
         Module.callMain(userArgs);
+        state.engineRunning = true;
       } catch (e) {
         // ExitStatus is normal exit — handled via Module.onExit.
         if (e && e.name === 'ExitStatus') return;
@@ -991,6 +1033,14 @@
   // the CSS-computed clientWidth was smaller, pushing the HUD off-screen
   // until a menu-triggered resize resynced.
 
+  // The GPU process reset or reclaimed the context (driver crash, memory
+  // pressure). WebGL state can't be rebuilt in place, so offer a reload.
+  $('canvas').addEventListener('webglcontextlost', () => {
+    if (!state.engineRunning || state.exited) return;
+    syncSavesToIDB();
+    showExitPanel(-1, 'The browser lost the graphics context (GPU reset or out of video memory). Relaunch to continue; your saves are kept.');
+  });
+
   $('canvas').addEventListener('click', () => {
     if (!state.launched || state.exited) return;
     if (document.pointerLockElement === $('canvas')) return;
@@ -1053,6 +1103,19 @@
   // on the server, writeUserFiles throws and bootEngine's catch restores
   // the picker with an error message — so a stale link recovers gracefully.
   (async () => {
+    // Engine threads need SharedArrayBuffer, which only exists on a
+    // cross-origin isolated page. Without it the engine fails deep inside
+    // startup, so stop here with the actual cause.
+    if (!window.crossOriginIsolated) {
+      setStatus('This page is not cross-origin isolated, so the engine cannot start. ' +
+                'It must be served over HTTPS (or localhost) with the COOP and COEP headers.');
+      Module.setStatus = () => {}; // keep the runtime's progress text from replacing it
+      $('launchBtn').disabled = true;
+      $('useFreedoomBtn').disabled = true;
+      state.launched = true; // block the Launch button and auto-launch
+      return;
+    }
+
     let source = 'URL';
     if (!launcherArgs.iwad) {
       const boot = await loadBootConfig();
