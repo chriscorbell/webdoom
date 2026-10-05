@@ -60,6 +60,10 @@
 
 #include <SDL2/SDL.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #include "c_cvars.h"
 #include "cmdlib.h"
 #include "i_interface.h"
@@ -129,6 +133,11 @@ void Unix_I_FatalError(const char* errortext)
 	// stderr instead; the web shell surfaces these to the browser console.
 	fprintf(stderr, "\n[UZDoom WASM BUILD] fatal error:\n%s\n",
 		errortext ? errortext : "(null)");
+	// Also hand the text to the page, which shows it on the exit panel
+	// instead of a bare exit code.
+	EM_ASM({
+		if (typeof Module.onFatalError === 'function') Module.onFatalError(UTF8ToString($0));
+	}, errortext ? errortext : "");
 	return;
 #else
 	// Close window or exit fullscreen and release mouse capture
