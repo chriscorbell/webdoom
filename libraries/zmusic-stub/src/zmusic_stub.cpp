@@ -444,6 +444,18 @@ static uint8_t* mus2mid(const uint8_t* mus, size_t mus_len, size_t* out_size) {
 }
 
 // --- MIDI stream internal helpers ---------------------------------------
+
+// Silence the synth and return every channel to its power-on state, with
+// channel 9 on the drum kit (General MIDI: channel 10 is percussion until a
+// program change says otherwise). tsf_reset() frees all channel state, which
+// would otherwise leave channel 9 on bank 0 / preset 0 (piano), so the drum
+// assignment must be redone after every reset: song start and each loop.
+static void reset_synth(tsf* synth) {
+    tsf_reset(synth);
+    if (!tsf_channel_set_bank_preset(synth, 9, 128, 0))
+        tsf_channel_set_presetnumber(synth, 9, 0, 1);
+}
+
 static bool open_midi_from_memory(MusicImpl* m, const uint8_t* data, size_t len) {
     try_load_soundfont();
     if (!g_sf_master) { g_last_error = "no SoundFont loaded"; return false; }
@@ -474,8 +486,7 @@ static bool open_midi_from_memory(MusicImpl* m, const uint8_t* data, size_t len)
     tsf* synth = tsf_copy(g_sf_master);
     if (!synth) { tml_free(evs); g_last_error = "tsf_copy failed"; return false; }
     tsf_set_output(synth, TSF_STEREO_INTERLEAVED, kSampleRate, kTsfGainDb);
-    // Make channel 9 use the drum bank (General MIDI convention).
-    tsf_channel_set_bank_preset(synth, 9, 128, 0);
+    reset_synth(synth);
 
     unsigned int total_ms = 0;
     tml_get_info(evs, nullptr, nullptr, nullptr, nullptr, &total_ms);
@@ -606,7 +617,7 @@ static void render_midi(MusicImpl* m, float* out, int frames) {
         if (m->looping) {
             m->cursor = m->events_head;
             m->cur_ms = 0.0;
-            tsf_reset(m->synth);
+            reset_synth(m->synth);
         } else {
             m->ended = true;
         }
@@ -794,7 +805,7 @@ extern "C" zmusic_bool ZMusic_Start(ZMusic_MusicStream h, int /*subsong*/, zmusi
     if (m->kind == MK_Midi) {
         m->cursor = m->events_head;
         m->cur_ms = 0.0;
-        if (m->synth) tsf_reset(m->synth);
+        if (m->synth) reset_synth(m->synth);
     } else if (m->kind == MK_Ogg) {
         stb_vorbis_seek_start(m->ogg);
     }
