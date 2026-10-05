@@ -82,6 +82,43 @@ EM_JS(void, uzdoom_emsc_patch_al_lookahead, (double seconds), {
     }
 });
 
+// Output limiter. Emscripten's OpenAL mixes every source into one master
+// GainNode wired straight to the AudioContext destination, and has no
+// equivalent of OpenAL Soft's ALC_SOFT_output_limiter, so a busy fight that
+// sums past full scale hard-clips at the output. Splice a Web Audio
+// DynamicsCompressorNode set up as a limiter (high ratio, hard knee, fast
+// attack; it also looks ahead ~6 ms) between that master gain and the
+// destination. It runs on the audio rendering thread, so it costs the main
+// thread nothing after setup.
+//
+// The spec'd compressor applies automatic makeup gain of
+// (1 / curve(0 dBFS))^0.6, which would make everything louder; a GainNode
+// after it cancels that, so audio below the threshold passes at unity.
+EM_JS(void, uzdoom_emsc_install_limiter, (), {
+    try {
+        var ctx = AL.currentCtx;
+        if (!ctx || !ctx.audioCtx || !ctx.gain || ctx.uzdoomLimiter) return;
+        var ac = ctx.audioCtx;
+        if (typeof ac.createDynamicsCompressor !== 'function') return;
+        var threshold = -2, ratio = 20;
+        var limiter = ac.createDynamicsCompressor();
+        limiter.threshold.value = threshold;
+        limiter.knee.value = 0;
+        limiter.ratio.value = ratio;
+        limiter.attack.value = 0.002;
+        limiter.release.value = 0.2;
+        var makeupUndo = ac.createGain();
+        makeupUndo.gain.value = Math.pow(10, 0.6 * (threshold - threshold / ratio) / 20);
+        ctx.gain.disconnect();
+        ctx.gain.connect(limiter);
+        limiter.connect(makeupUndo);
+        makeupUndo.connect(ac.destination);
+        ctx.uzdoomLimiter = limiter;
+    } catch (e) {
+        console.warn('[uzdoom] output limiter setup failed:', e);
+    }
+});
+
 // (A `uzdoom_emsc_log_audio_rate` EM_JS used to live here to confirm
 // AudioContext.sampleRate matches what we requested via ALC_FREQUENCY.
 // Removed now that the pipeline is verified — leaving the call site would
@@ -224,7 +261,7 @@ class OpenALSoundStream : public SoundStream
 	void *UserData;
 
 	TArray<ALubyte> Data;
-	// Emscripten's OpenAL doesn't expose AL_EXT_FLOAT32. When the engine asks
+	// If the OpenAL implementation has no float buffers and the engine asks
 	// for a Float stream (which music.cpp always does, for replay-gain), we
 	// keep Data as float32 (callback-facing) but push int16 to AL via this
 	// scratch buffer. mF32To16Fallback below switches the Play/Process refill
@@ -563,7 +600,11 @@ public:
 		}
 		else if((flags&Float))
 		{
-			if(alIsExtensionPresent("AL_EXT_FLOAT32"))
+			// Extension names are case-insensitive per the OpenAL spec, but
+			// Emscripten's lookup is an exact-case table keyed
+			// "AL_EXT_float32" (the extension's official spelling), so the
+			// upper-case query alone never matched there.
+			if(alIsExtensionPresent("AL_EXT_FLOAT32") || alIsExtensionPresent("AL_EXT_float32"))
 			{
 				if((flags&Mono)) Format = AL_FORMAT_MONO_FLOAT32;
 				else Format = AL_FORMAT_STEREO_FLOAT32;
@@ -571,12 +612,13 @@ public:
 #ifdef __EMSCRIPTEN__
 			else
 			{
-				// Emscripten's emulated OpenAL lacks AL_EXT_FLOAT32 — the
-				// classic result is a null CreateStream and silent music.
+				// Safety net for an OpenAL without float buffers (the
+				// classic result is a null CreateStream and silent music).
+				// Emscripten's does support them, so this should not run.
 				// Fall back to 16-bit integer for the AL submit path; the
 				// callback still receives a float32 buffer (unchanged
 				// upstream contract) and we down-convert right before
-				// alBufferData.
+				// alBufferData, hard-clipping anything past full scale.
 				mF32To16Fallback = true;
 				if((flags&Mono)) Format = AL_FORMAT_MONO16;
 				else             Format = AL_FORMAT_STEREO16;
@@ -816,6 +858,9 @@ OpenALSoundRenderer::OpenALSoundRenderer()
 		return;
 	}
 	attribs.Clear();
+#ifdef __EMSCRIPTEN__
+	uzdoom_emsc_install_limiter();
+#endif
 
 	const ALchar *const version = alGetString(AL_VERSION);
 
@@ -846,6 +891,19 @@ OpenALSoundRenderer::OpenALSoundRenderer()
 	alSpeedOfSound(343.3f);
 	if(ALC.EXT_EFX)
 		alListenerf(AL_METERS_PER_UNIT, 1.0f);
+#ifdef __EMSCRIPTEN__
+	// The engine wants no Doppler at all and turns it off per source with
+	// AL_DOPPLER_FACTOR 0. Emscripten's OpenAL has no per-source Doppler
+	// factor (the call fails with AL_INVALID_ENUM, which getALError hides),
+	// so its global factor of 1 applied to every sound. Velocities here are
+	// in map units per second against a speed of sound of 343.3, so a
+	// rocket (700 u/s) launched away from the player played at a third of
+	// its pitch, and anything flying at the player at 343+ u/s (an imp
+	// fireball is 350) divided by zero in the Doppler formula and produced
+	// an Infinity/NaN playbackRate. Disabling it globally gives a shift of
+	// exactly 1 for every source.
+	alDopplerFactor(0.f);
+#endif
 
 	alDistanceModel(AL_INVERSE_DISTANCE);
 	if(AL.EXT_source_distance_model)
@@ -1412,6 +1470,55 @@ SoundStream *OpenALSoundRenderer::CreateStream(SoundStreamCallback callback, int
 	return stream;
 }
 
+// Seeks a source that has just had its buffer attached to where the sound
+// should start: startTime for a new sound, or the saved position of a sound
+// being resumed (savegame load, snd_reset, an evicted looping sound coming
+// back).
+//
+// This must run after AL_BUFFER is set. OpenAL Soft just stores an offset
+// set on a stopped source and applies it at play time, but Emscripten's
+// OpenAL validates it immediately against the attached data and rejects any
+// non-zero offset on a source with no buffer (AL_INVALID_VALUE). That error
+// was hidden behind the AL_INVALID_ENUM still pending from the unsupported
+// per-source AL_DOPPLER_FACTOR (AL errors are sticky until read), so the
+// seek was silently dropped and every resumed sound restarted from 0.
+//
+// Offsets for looping sounds wrap around the sound's length. An offset the
+// buffer still can't satisfy is dropped and the sound plays from the start,
+// matching what OpenAL Soft does with an out-of-range stored offset. The
+// offset is always set, even to 0, so a recycled source never inherits a
+// stale seek position.
+void OpenALSoundRenderer::SetStartOffset(ALuint source, SoundHandle sfx, int chanflags, FISoundChannel *reuse_chan, float startTime)
+{
+	const bool loop = (chanflags & SNDF_LOOP) != 0;
+	const float sfxlength = (float)GetMSLength(sfx) / 1000.f;
+
+	if(!reuse_chan || reuse_chan->StartTime == 0)
+	{
+		float st = loop ? (sfxlength > 0 ? fmod(startTime, sfxlength) : 0.f)
+		                : clamp<float>(startTime, 0.f, sfxlength);
+		alSourcef(source, AL_SEC_OFFSET, st);
+	}
+	else if((chanflags&SNDF_ABSTIME))
+	{
+		ALint pos = ALint(reuse_chan->StartTime);
+		const ALint samples = (ALint)GetSampleLength(sfx);
+		if(loop && samples > 0) pos %= samples;
+		alSourcei(source, AL_SAMPLE_OFFSET, pos);
+	}
+	else
+	{
+		float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
+			std::chrono::steady_clock::now().time_since_epoch() -
+			std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
+		).count();
+		if(loop && sfxlength > 0) offset = fmod(offset, sfxlength);
+		alSourcef(source, AL_SEC_OFFSET, max(offset, 0.f));
+	}
+	// Out-of-range offset: keep playing from the start (see above).
+	alGetError();
+}
+
 FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, float pitch, int chanflags, FISoundChannel *reuse_chan, float startTime)
 {
 	if(FreeSfx.Size() == 0)
@@ -1464,24 +1571,6 @@ FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, floa
 	else
 		alSourcef(source, AL_PITCH, pitch);
 
-	if(!reuse_chan || reuse_chan->StartTime == 0)
-	{
-		float st = (chanflags&SNDF_LOOP) ? fmod(startTime, (float)GetMSLength(sfx) / 1000.f) : clamp<float>(startTime, 0.f, (float)GetMSLength(sfx) / 1000.f);
-		alSourcef(source, AL_SEC_OFFSET, st);
-	}
-	else
-	{
-		if((chanflags&SNDF_ABSTIME))
-			alSourcei(source, AL_SAMPLE_OFFSET, ALint(reuse_chan->StartTime));
-		else
-		{
-			float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
-				std::chrono::steady_clock::now().time_since_epoch() -
-				std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
-			).count();
-			if(offset > 0.f) alSourcef(source, AL_SEC_OFFSET, offset);
-		}
-	}
 	{
 		ALenum e1 = getALError();
 		if(e1 != AL_NO_ERROR)
@@ -1491,6 +1580,9 @@ FISoundChannel *OpenALSoundRenderer::StartSound(SoundHandle sfx, float vol, floa
 	}
 
 	alSourcei(source, AL_BUFFER, buffer);
+	if(getALError() != AL_NO_ERROR)
+		return NULL;
+	SetStartOffset(source, sfx, chanflags, reuse_chan, startTime);
 	if((chanflags&SNDF_NOPAUSE) || !SFXPaused)
 		alSourcePlay(source);
 	{
@@ -1642,27 +1734,6 @@ FISoundChannel *OpenALSoundRenderer::StartSound3D(SoundHandle sfx, SoundListener
 	else
 		alSourcef(source, AL_PITCH, pitch);
 
-	if(!reuse_chan || reuse_chan->StartTime == 0)
-	{
-		float sfxlength = (float)GetMSLength(sfx) / 1000.f;
-		float st = (chanflags & SNDF_LOOP)
-				? (sfxlength > 0 ? fmod(startTime, sfxlength) : 0)
-				: clamp<float>(startTime, 0.f, sfxlength);
-		alSourcef(source, AL_SEC_OFFSET, st);
-	}
-	else
-	{
-		if((chanflags&SNDF_ABSTIME))
-			alSourcei(source, AL_SAMPLE_OFFSET, ALint(reuse_chan->StartTime));
-		else
-		{
-			float offset = std::chrono::duration_cast<std::chrono::duration<float>>(
-				std::chrono::steady_clock::now().time_since_epoch() -
-				std::chrono::steady_clock::time_point::duration(reuse_chan->StartTime)
-			).count();
-			if(offset > 0.f) alSourcef(source, AL_SEC_OFFSET, offset);
-		}
-	}
 	{
 		ALenum e1 = getALError();
 		if(e1 != AL_NO_ERROR)
@@ -1672,6 +1743,9 @@ FISoundChannel *OpenALSoundRenderer::StartSound3D(SoundHandle sfx, SoundListener
 	}
 
 	alSourcei(source, AL_BUFFER, buffer);
+	if(getALError() != AL_NO_ERROR)
+		return NULL;
+	SetStartOffset(source, sfx, chanflags, reuse_chan, startTime);
 	if((chanflags&SNDF_NOPAUSE) || !SFXPaused)
 		alSourcePlay(source);
 	{
