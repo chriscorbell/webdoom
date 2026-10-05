@@ -17,5 +17,12 @@ enum
 
 void PerformWipe(FTexture* startimg, FTexture* endimg, int wipe_type, bool stopsound, std::function<void()> overlaydrawer);
 
+#ifdef __EMSCRIPTEN__
+// In the browser, PerformWipe only starts the wipe; the main loop calls
+// ContinueWipe once per frame while WipeInProgress.
+bool WipeInProgress();
+void ContinueWipe();
+#endif
+
 
 #endif

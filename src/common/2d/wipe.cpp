@@ -514,13 +514,85 @@ bool Wiper_Burn::Run(int ticks)
 }
 
 
-void PerformWipe(FTexture* startimg, FTexture* endimg, int wipe_type, bool stopsound, std::function<void()> overlaydrawer)
+//==========================================================================
+//
+// RunWipeStep
+//
+// Draws and presents one frame of a wipe. Returns true once it is done.
+// Wipes that can't interpolate advance in 40 Hz steps; with `block` set
+// this waits for the next step, otherwise it returns without drawing.
+//
+//==========================================================================
+
+static bool RunWipeStep(Wiper* wiper, uint64_t& wipestart, const std::function<void()>& overlaydrawer, bool block)
 {
-	// wipe update
-	uint64_t wipestart, nowtime, diff;
+	uint64_t nowtime, diff;
 	double diff_frac;
 	bool done;
 
+	if (wiper->Interpolatable() && !cl_capfps)
+	{
+		nowtime = I_msTime();
+		diff_frac = (nowtime - wipestart) * 40. / 1000.;	// Using 35 here feels too slow.
+		wipestart = nowtime;
+		twod->Begin(screen->GetWidth(), screen->GetHeight());
+		done = wiper->RunInterpolated(diff_frac);
+	}
+	else
+	{
+		do
+		{
+			if (block) I_WaitVBL(2);
+			nowtime = I_msTime();
+			diff = (nowtime - wipestart) * 40 / 1000;	// Using 35 here feels too slow.
+			if (diff < 1 && !block) return false;
+		} while (diff < 1);
+		wipestart = nowtime;
+		twod->Begin(screen->GetWidth(), screen->GetHeight());
+		done = wiper->Run(1);
+	}
+	if (overlaydrawer) overlaydrawer();
+	twod->End();
+	screen->Update();
+	twod->OnFrameDone();
+	return done;
+}
+
+static void FinishWipe(Wiper* wiper)
+{
+	delete wiper;
+	I_FreezeTime(false);
+	GSnd->SetSfxPaused(false, 1);
+}
+
+#ifdef __EMSCRIPTEN__
+// The browser only presents a WebGL frame when the requestAnimationFrame
+// callback returns, so running a wipe to completion in one loop would
+// freeze the page for its length and show only the last frame. PerformWipe
+// sets the wipe up instead, and the main loop advances it a frame at a
+// time through ContinueWipe.
+static Wiper* ActiveWiper;
+static uint64_t ActiveWipeStart;
+static std::function<void()> ActiveWipeOverlay;
+
+bool WipeInProgress()
+{
+	return ActiveWiper != nullptr;
+}
+
+void ContinueWipe()
+{
+	if (ActiveWiper == nullptr || !RunWipeStep(ActiveWiper, ActiveWipeStart, ActiveWipeOverlay, false))
+		return;
+
+	FinishWipe(ActiveWiper);
+	ActiveWiper = nullptr;
+	ActiveWipeOverlay = nullptr;
+}
+#endif
+
+void PerformWipe(FTexture* startimg, FTexture* endimg, int wipe_type, bool stopsound, std::function<void()> overlaydrawer)
+{
 	GSnd->SetSfxPaused(true, 1);
 	I_FreezeTime(true);
 	twod->End();
@@ -530,41 +602,19 @@ void PerformWipe(FTexture* startimg, FTexture* endimg, int wipe_type, bool stops
 	auto wiper = Wiper::Create(wipe_type);
 	wiper->SetTextures(starttex, endtex);
 
-	wipestart = I_msTime();
+	uint64_t wipestart = I_msTime();
 
-	do
+#ifdef __EMSCRIPTEN__
+	ActiveWiper = wiper;
+	ActiveWipeStart = wipestart;
+	ActiveWipeOverlay = std::move(overlaydrawer);
+	// Draw the first frame now, so this frame presents the wipe rather
+	// than whatever was last rendered.
+	ContinueWipe();
+#else
+	while (!RunWipeStep(wiper, wipestart, overlaydrawer, true))
 	{
-		if (wiper->Interpolatable() && !cl_capfps)
-		{
-			nowtime = I_msTime();
-			diff_frac = (nowtime - wipestart) * 40. / 1000.;	// Using 35 here feels too slow.
-			wipestart = nowtime;
-			twod->Begin(screen->GetWidth(), screen->GetHeight());
-			done = wiper->RunInterpolated(diff_frac);
-			if (overlaydrawer) overlaydrawer();
-			twod->End();
-			screen->Update();
-			twod->OnFrameDone();
-		}
-		else
-		{
-			do
-			{
-				I_WaitVBL(2);
-				nowtime = I_msTime();
-				diff = (nowtime - wipestart) * 40 / 1000;	// Using 35 here feels too slow.
-			} while (diff < 1);
-			wipestart = nowtime;
-			twod->Begin(screen->GetWidth(), screen->GetHeight());
-			done = wiper->Run(1);
-			if (overlaydrawer) overlaydrawer();
-			twod->End();
-			screen->Update();
-			twod->OnFrameDone();
-		}
-	} while (!done);
-	delete wiper;
-	I_FreezeTime(false);
-	GSnd->SetSfxPaused(false, 1);
-
+	}
+	FinishWipe(wiper);
+#endif
 }

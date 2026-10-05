@@ -1335,7 +1335,13 @@ static void D_DoomLoop_EmscTick(void*)
 	// context loss the instant the runtime dies).
 	try
 	{
-		D_DoomLoop_Iteration(s_emsc_lasttic);
+		// Screen wipes and capped frame rates both block in a loop on
+		// native. Here they'd spin the browser's main thread, so advance
+		// a wipe by one frame, and skip frames that have no tic due.
+		if (WipeInProgress())
+			ContinueWipe();
+		else if (Net_TicDue())
+			D_DoomLoop_Iteration(s_emsc_lasttic);
 	}
 	catch (const CExitEvent &ev)
 	{

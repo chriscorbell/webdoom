@@ -727,7 +727,12 @@ int SystemGLFrameBuffer::GetClientHeight()
 
 void SystemGLFrameBuffer::SetVSync( bool vsync )
 {
-#if defined (__APPLE__)
+#if defined (__EMSCRIPTEN__)
+	// SDL maps swap interval 0 to a setTimeout(0) main loop, which renders
+	// as fast as it can without ever reaching the screen any sooner. Stay on
+	// requestAnimationFrame, which is the browser's vsync.
+	(void)vsync;
+#elif defined (__APPLE__)
 	const GLint value = vsync ? 1 : 0;
 	CGLSetParameter( CGLGetCurrentContext(), kCGLCPSwapInterval, &value );
 #else

@@ -59,6 +59,11 @@ void D_QuitNetGame (void);
 //? how many ticks to run?
 void TryRunTics (void);
 
+#ifdef __EMSCRIPTEN__
+// Whether this frame would run a tic, without blocking for one.
+bool Net_TicDue();
+#endif
+
 //Use for checking to see if the netgame has stalled
 void Net_CheckLastReceived(int);
 
