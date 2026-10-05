@@ -129,19 +129,25 @@ bool FGLRenderState::ApplyShader()
 
 		totalLights = modLights + subLights + addLights;
 
-		// Skip passed the first 4 floats so the upload below only contains light data
-		lightPtr += 4;
-
-		float* findSpotsPtr = lightPtr + 11; // The 11th float contains '1' if the light is a spot light, see hw_dynlightdata.cpp
-
-		for (int n = 0; n < totalLights; n++)
+		// The GLSL ES 3.00 shader reads the ranges from the header in front of
+		// the light data and handles spot lights per light, so there lightPtr
+		// keeps pointing at the header and no spot light scan is needed.
+		if (!gles.glsl300es)
 		{
-			if (*findSpotsPtr > 0) // This is a spot light
+			// Skip passed the first 4 floats so the upload below only contains light data
+			lightPtr += 4;
+
+			float* findSpotsPtr = lightPtr + 11; // The 11th float contains '1' if the light is a spot light, see hw_dynlightdata.cpp
+
+			for (int n = 0; n < totalLights; n++)
 			{
-				flavour.hasSpotLight = true;
-				break;
+				if (*findSpotsPtr > 0) // This is a spot light
+				{
+					flavour.hasSpotLight = true;
+					break;
+				}
+				findSpotsPtr += LIGHT_VEC4_NUM * 4;
 			}
-			findSpotsPtr += LIGHT_VEC4_NUM * 4;
 		}
 	}
 
@@ -188,10 +194,20 @@ bool FGLRenderState::ApplyShader()
 	flavour.doDesaturate = mStreamData.uDesaturationFactor != 0;
 	flavour.useULightLevel = (mLightParms[3] >= 0); //#define uLightLevel uLightAttr.a
 
-	// Yes create shaders for all combinations of active lights to avoid more branches
-	flavour.dynLightsMod = (modLights > 0);
-	flavour.dynLightsSub = (subLights > 0);
-	flavour.dynLightsAdd = (addLights > 0);
+	if (gles.glsl300es)
+	{
+		// Lit or unlit is the only distinction, see FShader::Bind.
+		flavour.dynLightsMod = (totalLights > 0);
+		flavour.dynLightsSub = false;
+		flavour.dynLightsAdd = false;
+	}
+	else
+	{
+		// Yes create shaders for all combinations of active lights to avoid more branches
+		flavour.dynLightsMod = (modLights > 0);
+		flavour.dynLightsSub = (subLights > 0);
+		flavour.dynLightsAdd = (addLights > 0);
+	}
 
 	flavour.useObjectColor2 = (mStreamData.uObjectColor2.a > 0);
 	flavour.useGlowTopColor = mGlowEnabled && (mStreamData.uGlowTopColor[3] > 0);
@@ -246,7 +262,7 @@ bool FGLRenderState::ApplyShader()
 	activeShader->cur->muInterpolationFactor.Set(mStreamData.uInterpolationFactor);
 	activeShader->cur->muTimer.Set((double)(screen->FrameTime - firstFrame) * (double)mShaderTimer / 1000.);
 	activeShader->cur->muAlphaThreshold.Set(mAlphaThreshold);
-	activeShader->cur->muBoneIndexBase.Set(-1);
+	if (!gles.glsl300es) activeShader->cur->muBoneIndexBase.Set(-1);
 	activeShader->cur->muClipSplit.Set(mClipSplit);
 	activeShader->cur->muSpecularMaterial.Set(mGlossiness, mSpecularLevel);
 	activeShader->cur->muAddColor.Set(mStreamData.uAddColor);
@@ -327,8 +343,12 @@ bool FGLRenderState::ApplyShader()
 		matrixToGL(identityMatrix, activeShader->cur->normalmodelmatrix_index);
 	}
 
+	if (gles.glsl300es)
+	{
+		ApplyLightsAndBones300(lightPtr, modLights, subLights, addLights);
+	}
 	// Upload the light data
-	if (mLightIndex >= 0)
+	else if (mLightIndex >= 0)
 	{
 		// Calculate the total number of vec4s we need
 		int totalVectors = totalLights * LIGHT_VEC4_NUM;
@@ -346,7 +366,7 @@ bool FGLRenderState::ApplyShader()
 		activeShader->cur->muLightRange.Set(range);
 	}
 
-	if (gles.es3VertexFeatures)
+	if (gles.es3VertexFeatures && !gles.glsl300es)
 	{
 		// Upload bone data
 		// NOTE, this is pretty inefficient, it will be reloading the same data over and over in a single frame
@@ -366,6 +386,69 @@ bool FGLRenderState::ApplyShader()
 	return true;
 }
 
+
+//==========================================================================
+//
+// GLSL ES 3.00: upload the dynamic lights and bones for the current draw
+//
+//==========================================================================
+
+void FGLRenderState::ApplyLightsAndBones300(const float* lightHeader, int modLights, int subLights, int addLights)
+{
+	auto sh = activeShader->cur;
+	int totalLights = modLights + subLights + addLights;
+
+	if (totalLights > 0)
+	{
+		// lights[] = header vec4 + the light data. The same light list is often
+		// drawn several times in a row (multiple passes, split walls), so skip
+		// the upload when this program already holds it.
+		unsigned int generation = screen->mLights->GetGeneration();
+		if (sh->lightUploadIndex != mLightIndex || sh->lightUploadGeneration != generation)
+		{
+			const float header[4] = { 0.f, float(modLights * LIGHT_VEC4_NUM), float((modLights + subLights) * LIGHT_VEC4_NUM), float(totalLights * LIGHT_VEC4_NUM) };
+			int count = 1 + totalLights * LIGHT_VEC4_NUM;
+
+			if (memcmp(header, lightHeader, sizeof(header)) == 0)
+			{
+				glUniform4fv(sh->lights_index, count, lightHeader);
+			}
+			else
+			{
+				// The list got clamped to gles.maxlights. The kept lights are a
+				// prefix of the data, so only the header needs rewriting.
+				mLightUploadStaging.Resize(count * 4);
+				memcpy(&mLightUploadStaging[0], header, sizeof(header));
+				memcpy(&mLightUploadStaging[4], lightHeader + 4, (count - 1) * 4 * sizeof(float));
+				glUniform4fv(sh->lights_index, count, &mLightUploadStaging[0]);
+			}
+			sh->lightUploadIndex = mLightIndex;
+			sh->lightUploadGeneration = generation;
+		}
+	}
+
+	// Bones: upload this model's matrices starting at its base index so the
+	// shader indexes bones[] from 0, and bones[] only needs to hold one model.
+	int boneBase = -1;
+	if (mBoneIndexBase >= 0)
+	{
+		int count = min(screen->mBones->GetCurrentIndex() - mBoneIndexBase, (int)gles.maxbones);
+		if (count > 0)
+		{
+			unsigned int generation = screen->mBones->GetGeneration();
+			if (sh->boneUploadIndex != mBoneIndexBase || sh->boneUploadGeneration != generation || sh->boneUploadCount != count)
+			{
+				const float* bonesPtr = (const float*)screen->mBones->GetBuffer()->Memory() + (size_t)mBoneIndexBase * 16;
+				glUniformMatrix4fv(sh->bones_index, count, false, bonesPtr);
+				sh->boneUploadIndex = mBoneIndexBase;
+				sh->boneUploadGeneration = generation;
+				sh->boneUploadCount = count;
+			}
+			boneBase = 0;
+		}
+	}
+	sh->muBoneIndexBase.Set(boneBase);
+}
 
 //==========================================================================
 //

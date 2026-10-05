@@ -65,6 +65,7 @@ BoneBuffer::~BoneBuffer()
 void BoneBuffer::Clear()
 {
 	mIndex = 0;
+	mGeneration++;
 
 	mPipelinePos++;
 	mPipelinePos %= mPipelineNbr;

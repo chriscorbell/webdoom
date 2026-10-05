@@ -362,6 +362,14 @@ public: class ShaderVariantData
 		int normalmodelmatrix_index = 0;
 		int texturematrix_index = 0;
 
+		// What was last uploaded to this program's lights[] / bones[] arrays
+		// (buffer generation + index), so repeated draws can skip the upload.
+		unsigned int lightUploadGeneration = ~0u;
+		int lightUploadIndex = -1;
+		unsigned int boneUploadGeneration = ~0u;
+		int boneUploadIndex = -1;
+		int boneUploadCount = 0;
+
 		int currentglowstate = 0;
 		int currentgradientstate = 0;
 		int currentsplitstate = 0;
@@ -394,6 +402,8 @@ public:
 
 	uint32_t CreateShaderTag(ShaderFlavourData &flavour)
 	{
+		// Every field needs its own bits: the variant map is keyed on this tag,
+		// so overlapping fields would hand out the wrong compiled program.
 		uint32_t tag = 0;
 		tag |= (flavour.textureMode & 0x7);
 
@@ -401,29 +411,29 @@ public:
 
 		tag |= (flavour.blendFlags & 7) << 6;
 
-		tag |= (flavour.twoDFog & 1) << 7;
-		tag |= (flavour.fogEnabled & 1) << 8;
-		tag |= (flavour.fogEquationRadial & 1) << 9;
-		tag |= (flavour.colouredFog & 1) << 10;
+		tag |= (flavour.twoDFog & 1) << 9;
+		tag |= (flavour.fogEnabled & 1) << 10;
+		tag |= (flavour.fogEquationRadial & 1) << 11;
+		tag |= (flavour.colouredFog & 1) << 12;
 
-		tag |= (flavour.doDesaturate & 1) << 11;
+		tag |= (flavour.doDesaturate & 1) << 13;
 
-		tag |= (flavour.dynLightsMod & 1) << 12;
-		tag |= (flavour.dynLightsSub & 1) << 13;
-		tag |= (flavour.dynLightsAdd & 1) << 14;
-		tag |= (flavour.useULightLevel & 1) << 15;
-		tag |= (flavour.useObjectColor2 & 1) << 16;
-		tag |= (flavour.useGlowTopColor & 1) << 17;
-		tag |= (flavour.useGlowBottomColor & 1) << 18;
-		tag |= (flavour.useColorMap & 1) << 19;
-		tag |= (flavour.buildLighting & 1) << 20;
-		tag |= (flavour.bandedSwLight & 1) << 21;
+		tag |= (flavour.dynLightsMod & 1) << 14;
+		tag |= (flavour.dynLightsSub & 1) << 15;
+		tag |= (flavour.dynLightsAdd & 1) << 16;
+		tag |= (flavour.useULightLevel & 1) << 17;
+		tag |= (flavour.useObjectColor2 & 1) << 18;
+		tag |= (flavour.useGlowTopColor & 1) << 19;
+		tag |= (flavour.useGlowBottomColor & 1) << 20;
+		tag |= (flavour.useColorMap & 1) << 21;
+		tag |= (flavour.buildLighting & 1) << 22;
+		tag |= (flavour.bandedSwLight & 1) << 23;
 
 #ifdef NPOT_EMULATION
-		tag |= (flavour.npotEmulation & 1) << 22;
+		tag |= (flavour.npotEmulation & 1) << 24;
 #endif
-		tag |= (flavour.hasSpotLight & 1) << 23;
-		tag |= (flavour.paletteInterpolate & 1) << 24;
+		tag |= (flavour.hasSpotLight & 1) << 25;
+		tag |= (flavour.paletteInterpolate & 1) << 26;
 
 		return tag;
 	}
