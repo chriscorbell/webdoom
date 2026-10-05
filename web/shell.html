@@ -245,11 +245,19 @@
       monitorRunDependencies: function (n) {
         Module.setStatus(n ? ('Loading engine… (' + n + ' deps)') : 'Engine ready.');
       },
+      // The Docker build replaces this with a hash of the engine files and
+      // every asset URL carries it as ?v=, so a deploy changes the URLs and
+      // a browser can't pair a new uzdoom.js with a cached old uzdoom.wasm.
+      // Local builds keep the placeholder and load plain URLs.
+      buildId: '__UZDOOM_BUILD_ID__',
+      locateFile: function (path) {
+        return Module.buildId.indexOf('__') === 0 ? path : path + '?v=' + Module.buildId;
+      },
     };
     window.Module = Module;
   </script>
-  <script src="uzdoom-melt.js"></script>
-  <script src="uzdoom-loader.js"></script>
+  <script src="uzdoom-melt.js?v=__UZDOOM_BUILD_ID__"></script>
+  <script src="uzdoom-loader.js?v=__UZDOOM_BUILD_ID__"></script>
   {{{ SCRIPT }}}
 </body>
 </html>

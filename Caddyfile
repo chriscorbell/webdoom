@@ -25,25 +25,32 @@
         Referrer-Policy        "no-referrer"
     }
 
-    # Content-addressable assets (change only when the image is rebuilt)
-    @immutable path *.wasm *.data *.pk3 *.sf2 *.wopl *.wopn
-    header @immutable Cache-Control "public, max-age=31536000, immutable"
+    # Asset URLs carry ?v=<hash of the engine files>, stamped by the
+    # Dockerfile, so a versioned response never changes. Everything else,
+    # index.html included, is revalidated on each load (a 304 when nothing
+    # changed), so a deploy is picked up on the next visit.
+    @versioned query v=*
+    header @versioned Cache-Control "public, max-age=31536000, immutable"
 
-    # HTML + JS can change between rebuilds — short cache
-    @shortcache path *.html *.js /
-    header @shortcache Cache-Control "public, max-age=300"
+    @unversioned {
+        not query v=*
+        not path /private/*
+    }
+    header @unversioned Cache-Control "no-cache"
 
     # Emscripten produces .wasm with the correct MIME type by default on
     # Caddy, but be explicit for older or customised setups.
     @wasm path *.wasm
     header @wasm Content-Type "application/wasm"
 
-    # Side-loaded IWADs: files mounted at runtime via `docker run -v ...`
-    # into /srv/private/. Kept out of the image, out of search engines,
-    # and marked immutable for client caching.
+    # Side-loaded WADs and mods: files mounted at runtime via
+    # `docker run -v ...` into /srv/private/. Kept out of the image and out
+    # of search engines. The loader keeps its own copy in IndexedDB and
+    # checks these with a HEAD request, so the HTTP cache must not pin an
+    # old version.
     @sideloaded path /private/*
     header @sideloaded {
         X-Robots-Tag  "noindex, nofollow"
-        Cache-Control "private, max-age=31536000, immutable"
+        Cache-Control "private, no-cache"
     }
 }
