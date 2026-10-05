@@ -82,6 +82,43 @@ EM_JS(void, uzdoom_emsc_patch_al_lookahead, (double seconds), {
     }
 });
 
+// Output limiter. Emscripten's OpenAL mixes every source into one master
+// GainNode wired straight to the AudioContext destination, and has no
+// equivalent of OpenAL Soft's ALC_SOFT_output_limiter, so a busy fight that
+// sums past full scale hard-clips at the output. Splice a Web Audio
+// DynamicsCompressorNode set up as a limiter (high ratio, hard knee, fast
+// attack; it also looks ahead ~6 ms) between that master gain and the
+// destination. It runs on the audio rendering thread, so it costs the main
+// thread nothing after setup.
+//
+// The spec'd compressor applies automatic makeup gain of
+// (1 / curve(0 dBFS))^0.6, which would make everything louder; a GainNode
+// after it cancels that, so audio below the threshold passes at unity.
+EM_JS(void, uzdoom_emsc_install_limiter, (), {
+    try {
+        var ctx = AL.currentCtx;
+        if (!ctx || !ctx.audioCtx || !ctx.gain || ctx.uzdoomLimiter) return;
+        var ac = ctx.audioCtx;
+        if (typeof ac.createDynamicsCompressor !== 'function') return;
+        var threshold = -2, ratio = 20;
+        var limiter = ac.createDynamicsCompressor();
+        limiter.threshold.value = threshold;
+        limiter.knee.value = 0;
+        limiter.ratio.value = ratio;
+        limiter.attack.value = 0.002;
+        limiter.release.value = 0.2;
+        var makeupUndo = ac.createGain();
+        makeupUndo.gain.value = Math.pow(10, 0.6 * (threshold - threshold / ratio) / 20);
+        ctx.gain.disconnect();
+        ctx.gain.connect(limiter);
+        limiter.connect(makeupUndo);
+        makeupUndo.connect(ac.destination);
+        ctx.uzdoomLimiter = limiter;
+    } catch (e) {
+        console.warn('[uzdoom] output limiter setup failed:', e);
+    }
+});
+
 // (A `uzdoom_emsc_log_audio_rate` EM_JS used to live here to confirm
 // AudioContext.sampleRate matches what we requested via ALC_FREQUENCY.
 // Removed now that the pipeline is verified — leaving the call site would
@@ -816,6 +853,9 @@ OpenALSoundRenderer::OpenALSoundRenderer()
 		return;
 	}
 	attribs.Clear();
+#ifdef __EMSCRIPTEN__
+	uzdoom_emsc_install_limiter();
+#endif
 
 	const ALchar *const version = alGetString(AL_VERSION);
 
