@@ -116,9 +116,14 @@ if( NOT TARGET zipdir )
 		COMMAND ${CMAKE_COMMAND} -E touch "${CMAKE_BINARY_DIR}/zipdir.stamp" )
 	set( UZDOOM_ZIPDIR_CMD ${Python3_EXECUTABLE} ${UZDOOM_ZIPDIR_PY} )
 	set( UZDOOM_ZIPDIR_TOUCH "${CMAKE_BINARY_DIR}/zipdir.stamp" )
+	# 'zipdir' is only a custom target here, which orders the build but is not
+	# a file dependency. Depend on the stamp it touches so the pk3s get
+	# repacked like they do with the native tool (e.g. after shader edits).
+	set( UZDOOM_ZIPDIR_DEP "${CMAKE_BINARY_DIR}/zipdir.stamp" )
 else()
 	set( UZDOOM_ZIPDIR_CMD zipdir )
 	set( UZDOOM_ZIPDIR_TOUCH $<TARGET_FILE:zipdir> )
+	set( UZDOOM_ZIPDIR_DEP "" )
 endif()
 
 # Simplify pk3 building, add_pk3(filename srcdirectory)
@@ -130,11 +135,11 @@ function( add_pk3 PK3_NAME PK3_DIR )
 		add_custom_command( OUTPUT ${ZDOOM_OUTPUT_DIR}/${PK3_NAME}
 			COMMAND ${UZDOOM_ZIPDIR_CMD} -udf ${PK3_ZIPDIR_OPTIONS} ${ZDOOM_OUTPUT_DIR}/${PK3_NAME} ${PK3_DIR}
 			COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ZDOOM_OUTPUT_DIR}/${PK3_NAME} $<TARGET_FILE_DIR:zdoom>/${PK3_NAME}
-			DEPENDS zipdir )
+			DEPENDS zipdir ${UZDOOM_ZIPDIR_DEP} )
 	else()
 		add_custom_command( OUTPUT ${ZDOOM_OUTPUT_DIR}/${PK3_NAME}
 			COMMAND ${UZDOOM_ZIPDIR_CMD} -udf ${PK3_ZIPDIR_OPTIONS} ${ZDOOM_OUTPUT_DIR}/${PK3_NAME} ${PK3_DIR}
-			DEPENDS zipdir )
+			DEPENDS zipdir ${UZDOOM_ZIPDIR_DEP} )
 	endif()
 	# Create a list of source files for this PK3, for use in the IDE
 	# Phase 1: Create a list of all source files for this PK3 archive, except
