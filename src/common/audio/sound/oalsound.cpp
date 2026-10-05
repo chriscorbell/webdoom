@@ -261,7 +261,7 @@ class OpenALSoundStream : public SoundStream
 	void *UserData;
 
 	TArray<ALubyte> Data;
-	// Emscripten's OpenAL doesn't expose AL_EXT_FLOAT32. When the engine asks
+	// If the OpenAL implementation has no float buffers and the engine asks
 	// for a Float stream (which music.cpp always does, for replay-gain), we
 	// keep Data as float32 (callback-facing) but push int16 to AL via this
 	// scratch buffer. mF32To16Fallback below switches the Play/Process refill
@@ -600,7 +600,11 @@ public:
 		}
 		else if((flags&Float))
 		{
-			if(alIsExtensionPresent("AL_EXT_FLOAT32"))
+			// Extension names are case-insensitive per the OpenAL spec, but
+			// Emscripten's lookup is an exact-case table keyed
+			// "AL_EXT_float32" (the extension's official spelling), so the
+			// upper-case query alone never matched there.
+			if(alIsExtensionPresent("AL_EXT_FLOAT32") || alIsExtensionPresent("AL_EXT_float32"))
 			{
 				if((flags&Mono)) Format = AL_FORMAT_MONO_FLOAT32;
 				else Format = AL_FORMAT_STEREO_FLOAT32;
@@ -608,12 +612,13 @@ public:
 #ifdef __EMSCRIPTEN__
 			else
 			{
-				// Emscripten's emulated OpenAL lacks AL_EXT_FLOAT32 — the
-				// classic result is a null CreateStream and silent music.
+				// Safety net for an OpenAL without float buffers (the
+				// classic result is a null CreateStream and silent music).
+				// Emscripten's does support them, so this should not run.
 				// Fall back to 16-bit integer for the AL submit path; the
 				// callback still receives a float32 buffer (unchanged
 				// upstream contract) and we down-convert right before
-				// alBufferData.
+				// alBufferData, hard-clipping anything past full scale.
 				mF32To16Fallback = true;
 				if((flags&Mono)) Format = AL_FORMAT_MONO16;
 				else             Format = AL_FORMAT_STEREO16;
